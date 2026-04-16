@@ -1,0 +1,26 @@
+import Test
+
+access(all) fun actionsCount(): Int {
+    let result = _executeScript("../scripts/actions/count.cdc", [])
+    Test.expect(result, Test.beSucceeded())
+    return result.returnValue as! Int
+}
+
+access(all) fun actionsIncrementCount(signer: Test.TestAccount) {
+    let result = _executeTransaction("transactions/actions/increment.cdc", [], signer)
+    Test.expect(result, Test.beSucceeded())
+}
+
+access(self) fun _executeScript(_ path: String, _ args: [AnyStruct]): Test.ScriptResult {
+    return Test.executeScript(Test.readFile(path), args)
+}
+
+access(self) fun _executeTransaction(_ path: String, _ args: [AnyStruct], _ signer: Test.TestAccount): Test.TransactionResult {
+    let txn = Test.Transaction(
+        code: Test.readFile(path),
+        authorizers: [signer.address],
+        signers: [signer],
+        arguments: args
+    )
+    return Test.executeTransaction(txn)
+}
