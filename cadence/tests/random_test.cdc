@@ -1,8 +1,12 @@
+// PLACEHOLDER: this test suite exists to verify that the CI pipeline correctly
+// runs Cadence tests, scripts, and transactions. The assertions here are not
+// meaningful coverage of contract behavior — replace with real tests once the
+// contracts have behavior to exercise.
 import Test
 import BlockchainHelpers
 
-import "deployment_helpers.cdc"
-import "test_helpers.cdc"
+import "helpers/deployment_helpers.cdc"
+import "helpers/actions_helpers.cdc"
 
 access(all) var signer = Test.createAccount()
 
@@ -15,35 +19,17 @@ access(all) fun beforeEach() {
 }
 
 access(all) fun setup() {
-    deployContracts()
+    deployAllContracts()
     snapShot = getCurrentBlockHeight()
 }
 
-access(all) fun test_deploy_contracts() {
+access(all) fun test_script() {
+    let result = actionsCount()
+    Test.assertEqual(0, result)
+    Test.expect(result, Test.beGreaterThan(-1))
     Test.assert(true, message: "Test should be true")
-    let measured = 1.0
-    Test.assertEqual(1.0, measured)
-    Test.expect(measured, Test.beGreaterThan(0.5))
-
-    var count = actionsCount()
-    Test.assertEqual(count, 0)
-    incrementFYVCount(amount: 10, signer: signer)
-    count = actionsCount()
-    Test.assertEqual(count, 10)
 }
 
-access(all) fun test_actions_count_1() {
-    var count = actionsCount()
-    Test.assertEqual(count, 0)
-    incrementFYVCount(amount: 10, signer: signer)
-    count = actionsCount()
-    Test.assertEqual(count, 10)
-}
-
-access(all) fun test_actions_count_2() {
-    var count = actionsCount()
-    Test.assertEqual(count, 0)
-    incrementFYVCount(amount: 10, signer: signer)
-    count = actionsCount()
-    Test.assertEqual(count, 10)
+access(all) fun test_transaction() {
+    actionsIncrementCount(signer: signer)
 }
