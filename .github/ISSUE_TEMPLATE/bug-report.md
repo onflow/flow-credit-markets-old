@@ -1,28 +1,14 @@
 ---
-name: Reporting a Problem/Bug
-about: Reporting a Problem/Bug
+name: Bug Report
+about: Report a problem or unexpected behavior
 title: ''
-labels: bug, Feedback
+labels: Bug
 assignees: ''
 
 ---
 
-## Instructions
+## Problem
 
-Please fill out the template below to the best of your ability and include a label indicating which tool/service you were working with when you encountered the problem.
+## Steps to Reproduce
 
-### Problem
-
-<what is the problem you've encountered?> 
-
-### Steps to Reproduce 
-
-<share any logs/screenshots or steps to replicate>
-
-### Acceptance Criteria
-
-<if any>
-  
-### Context
-
-<what are you currently working on that this is blocking?>
+## Expected vs Actual Behavior
