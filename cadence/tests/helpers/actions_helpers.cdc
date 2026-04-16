@@ -1,11 +1,16 @@
 import Test
 
+// PLACEHOLDER: wraps the stub count script used to verify CI script execution.
+// Replace alongside scripts/actions/count.cdc once real state exists.
 access(all) fun actionsCount(): Int {
     let result = _executeScript("../scripts/actions/count.cdc", [])
     Test.expect(result, Test.beSucceeded())
     return result.returnValue as! Int
 }
 
+// PLACEHOLDER: wraps the stub increment transaction used to verify CI
+// transaction execution. Replace alongside transactions/actions/increment.cdc
+// once real mutations exist.
 access(all) fun actionsIncrementCount(signer: Test.TestAccount) {
     let result = _executeTransaction("transactions/actions/increment.cdc", [], signer)
     Test.expect(result, Test.beSucceeded())

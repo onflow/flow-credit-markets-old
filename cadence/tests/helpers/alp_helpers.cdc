@@ -1,5 +1,7 @@
 import Test
 
+// PLACEHOLDER: wraps the stub count script used to verify CI script execution.
+// Replace alongside scripts/alp/count.cdc once real state exists.
 access(all) fun alpCount(): Int {
     let result = _executeScript("../scripts/alp/count.cdc", [])
     Test.expect(result, Test.beSucceeded())

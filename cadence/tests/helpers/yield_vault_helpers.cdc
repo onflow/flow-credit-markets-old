@@ -1,5 +1,7 @@
 import Test
 
+// PLACEHOLDER: wraps the stub count script used to verify CI script execution.
+// Replace alongside scripts/yield_vaults/count.cdc once real state exists.
 access(all) fun yieldVaultsCount(): Int {
     let result = _executeScript("../scripts/yield_vaults/count.cdc", [])
     Test.expect(result, Test.beSucceeded())

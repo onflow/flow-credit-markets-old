@@ -1,3 +1,7 @@
+// PLACEHOLDER: this test suite exists to verify that the CI pipeline correctly
+// runs Cadence tests, scripts, and transactions. The assertions here are not
+// meaningful coverage of contract behavior — replace with real tests once the
+// contracts have behavior to exercise.
 import Test
 import BlockchainHelpers
 
