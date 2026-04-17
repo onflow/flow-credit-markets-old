@@ -11,7 +11,7 @@ import "FungibleToken"
 /// for example withdrawing/depositing funds.
 ///
 /// The Pool supports a limited set of tokens. Each supported token has associated information, which
-/// is tracked with the TokenStateRecord type.
+/// is tracked with the TokenStateRecord type. Tokens are identified by their Type.
 ///
 /// The Reserves resource holds all funds and manage deposits and withdrawals.
 ///
@@ -34,6 +34,14 @@ access(all) contract FlowALP {
     /// adding supported tokens, liquidation overrides, etc. Held by the
     /// deployer (or a governance resource) — never granted to end users.
     access(all) entitlement Admin
+
+    /// Enables opening and interacting with positions (withdraw/deposit/...)
+    /// In the mature protocol, these actions will be publicly accessible.
+    access(all) entitlement Participant
+
+    /// Enables manual liquidation. This is gated as a safety precaution.
+    /// In the mature protocol, liquidation should be a publicly accessible operation.
+    access(all) entitlement Liquidate
 
     /* ---------- Value Types ---------- */
 
@@ -62,9 +70,12 @@ access(all) contract FlowALP {
 
     /// TokenStateRecord
     ///
-    /// Live per-token state held inside the pool.
+    /// Holds all persisted metadata related to a token supported by the Pool.
+    /// Supported tokens are uniquely identified by their Cadence Type (eg. `token.getType()`)
+    /// Each supported token must implement the FungibleToken interface.
     access(all) struct TokenStateRecord {
         access(self) var tokenType: Type
+        // TODO: total credit/debit balance, borrow/collateral factors, interest indices will live here
 
         init(
             tokenType: Type,
@@ -77,17 +88,18 @@ access(all) contract FlowALP {
 
     /// PositionRecord
     ///
-    /// Internal per-position state held by the pool, keyed by the Position
-    /// resource's UUID. Stores scaled balances — the true balance is
-    /// recovered by multiplying the scaled balance by the current interest
-    /// index for its direction. Scaled storage means interest accrues
-    /// "for free" across time without touching per-position state.
+    /// Holds all persisted state related to a particular Position.
+    /// Positions are uniquely identified by their ID, which is the UUID of the Position resource
+    /// granted when the position is opened.
     access(all) struct PositionRecord {
         /// Mirror of the Position resource's UUID; same value the Pool uses
-        /// as dict key. Kept for self-describing logs/events.
-        /// TODO(jord): above was AI reasoning - is is correct?
+        /// as dict key. Kept for self-describing logs/events (?)
+        ///
+        /// TODO: verify if this is needed
         access(all) let id: UInt64
+
         /// Set of credit and debit balances associated with this position.
+        /// TODO(jord): currently these are non-scaled as there is no interest accrual.
         access(self) var balances: {Type: SignedAmount}
 
         init(id: UInt64) {
@@ -101,9 +113,7 @@ access(all) contract FlowALP {
     /// Reserves
     ///
     /// Custody component that owns the FungibleToken vaults backing the Pool.
-    ///
-    /// Mutating methods are access(contract), so only FlowALP contract
-    /// code (in practice, Pool methods) can move funds.
+    /// All token movements performed by the Pool are mediated by Reserves.
     access(all) resource Reserves {
         access(self) var vaults: @{Type: {FungibleToken.Vault}}
 
@@ -115,7 +125,9 @@ access(all) contract FlowALP {
         /// of the correct type to establish custody. Fails if already
         /// supported.
         access(contract) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
-            pre { emptyVault.balance == 0.0: "initial vault must be empty" }
+            pre {
+                emptyVault.balance == 0.0: "initial vault must be empty"
+            }
             let tokenType = emptyVault.getType()
             assert(self.vaults[tokenType] == nil, message: "token type already supported")
             let prior <- self.vaults[tokenType] <- emptyVault
@@ -138,6 +150,8 @@ access(all) contract FlowALP {
             return <- vaultRef.withdraw(amount: amount)
         }
 
+        /// Returns the current reserve balance of the given token.
+        /// If the token is unsupported, returns 0.
         access(all) view fun getBalance(tokenType: Type): UFix64 {
             if let vaultRef = &self.vaults[tokenType] as &{FungibleToken.Vault}? {
                 return vaultRef.balance
@@ -145,10 +159,12 @@ access(all) contract FlowALP {
             return 0.0
         }
 
+        /// Returns the set of supported tokens. Output list has no guaranteed order.
         access(all) view fun getSupportedTokens(): [Type] {
             return self.vaults.keys
         }
 
+        /// Returns true if the given token is supported.
         access(all) view fun isSupported(tokenType: Type): Bool {
             return self.vaults[tokenType] != nil
         }
@@ -161,37 +177,29 @@ access(all) contract FlowALP {
     access(all) struct PoolConfig {
         /// The token used as the pool's numeraire (unit of account).
         access(all) let numeraire: Type
-        /// Health factor below which a position becomes eligible for liquidation.
-        access(self) var liquidationTriggerHF: UFix128
-        /// Health factor a position must be restored to (or below) after
-        /// liquidation; caps how much collateral can be seized.
-        access(self) var liquidationTargetHF: UFix128
         /// When paused, the pool rejects deposits, withdrawals, and liquidations.
         access(self) var paused: Bool
 
         init(
-            defaultToken: Type,
-            liquidationTriggerHF: UFix128,
-            liquidationTargetHF: UFix128
+            numeraire: Type,
         ) {
-            self.numeraire = defaultToken
-            self.liquidationTriggerHF = liquidationTriggerHF
-            self.liquidationTargetHF = liquidationTargetHF
+            self.numeraire = numeraire
             self.paused = false
         }
     }
 
-    /// The Pool orchestrates per-token accounting (tokenStates), per-position
-    /// records, and custody (reserves). Users interact with it indirectly via
-    /// their Position resource (which proves ownership) plus the public
-    /// capability.
+    /// Pool
+    ///
+    /// The Pool is the top-level container implementing the FlowALP protocol.
+    /// It orchestrates per-token accounting, per-position records, and custody (reserves). 
     access(all) resource Pool {
-        access(self) var config: PoolConfig
-        access(self) var tokenStates: {Type: TokenStateRecord}
+        access(self) let config: PoolConfig
+        /// Tracks global accounting information for each supported token.
+        access(self) let tokenStates: {Type: TokenStateRecord}
         /// Custody — owns the FungibleToken vaults. See Reserves.
         access(self) let reserves: @Reserves
         /// Positions keyed by the Position resource's UUID.
-        access(self) var positions: {UInt64: PositionRecord}
+        access(self) let positions: {UInt64: PositionRecord}
 
         init(config: PoolConfig) {
             self.config = config
@@ -199,8 +207,6 @@ access(all) contract FlowALP {
             self.reserves <- create Reserves()
             self.positions = {}
         }
-
-        /* --- reserves passthrough reads --- */
 
         access(all) view fun getReserveBalance(tokenType: Type): UFix64 {
             return self.reserves.getBalance(tokenType: tokenType)
@@ -213,50 +219,49 @@ access(all) contract FlowALP {
         /// Mint a new position and return the owner's handle resource. The
         /// Position's UUID (assigned by Cadence at creation) is the key
         /// under which its PositionRecord is stored in the pool.
-        /// TODO(jord): this must be made non-public
-        access(all) fun openPosition(): @Position {
+        access(Participant) fun openPosition(): @Position {
             let position <- create Position()
             self.positions[position.uuid] = PositionRecord(id: position.uuid)
             return <- position
         }
 
-        /// Deposit tokens into a position. Public: anyone holding a
-        /// reference can add collateral to any position (doing so can only
-        /// help the owner). The reference itself identifies the target
-        /// position via its UUID.
-        access(all) fun deposit(position: &Position, from: @{FungibleToken.Vault}) {
+        /// Deposit tokens into a position.
+        /// TODO: detailed documentation
+        access(Participant) fun deposit(position: &Position, from: @{FungibleToken.Vault}) {
+            pre {
+                self.reserves.isSupported(tokenType: from.getType())
+            }
             let _pid = position.uuid
             destroy from // placeholder — real impl routes to the reserve vault
         }
 
-        /// Withdraw tokens from a position. Ownership is enforced upstream
-        /// by Position.withdraw — this Pool method accepts any `&Position`
-        /// and trusts that the caller chain holds the owning resource.
-        /// Withdrawal may increase debt (Credit → Debit flip) if the
-        /// position still has sufficient health afterwards.
+        /// Withdraw tokens from a position.
+        /// TODO: detailed documentation
         access(all) fun withdraw(
-            position: &Position,
+            position: auth(FungibleToken.Withdraw) &Position,
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
+            pre {
+                self.reserves.isSupported(tokenType: tokenType)
+            }
             let _pid = position.uuid
             let _token = tokenType
             let _amt = amount
             panic("not implemented")
         }
 
-        /// Manually liquidate an unhealthy position. Takes the target
-        /// position's UUID rather than a reference, since the liquidator
-        /// does not hold the owner's Position resource. The liquidator
-        /// repays `repay` of the position's debt (in the vault's token)
-        /// and receives `seizeType` collateral at a liquidation bonus.
-        /// The position's post-liquidation health factor must not exceed
-        /// the configured liquidationTargetHF.
-        access(all) fun liquidate(
+        /// Manually liquidate an unhealthy position.
+        /// TODO: detailed documentation
+        access(Admin | Liquidate) fun liquidate(
             positionUUID: UInt64,
             repay: @{FungibleToken.Vault},
-            seizeType: Type
+            seizeType: Type, /* will need more params here */
         ): @{FungibleToken.Vault} {
+            pre {
+                self.reserves.isSupported(tokenType: repay.getType())
+                self.reserves.isSupported(tokenType: seizeType)
+            }
             let _pid = positionUUID
             let _seize = seizeType
             destroy repay
@@ -266,7 +271,6 @@ access(all) contract FlowALP {
         access(Admin) fun pause() {}
 
         access(Admin) fun unpause() {}
-
     }
 
     /* ---------- Position Resource ---------- */
@@ -276,24 +280,12 @@ access(all) contract FlowALP {
     /// The user-held handle for a position. Holds no fields — its identity
     /// is its Cadence-assigned `uuid`, and that UUID is the key under which
     /// the Pool stores the corresponding PositionRecord. Holding this
-    /// resource is proof of ownership for withdrawals. The resource itself
-    /// stores no funds; all custody lives in the pool.
-    access(all) resource Position {
-
-        /// Deposit to this position. Depending on the pre-deposit state,
-        /// this can either add collateral or pay down debt.
-        access(all) fun deposit(from: @{FungibleToken.Vault}) {
-            destroy from
-        }
-
-        /// Withdraw from this position. Depending on the pre-deposit state,
-        /// this can either reduce collateral or add debt.
-        access(all) fun withdraw(tokenType: Type, amount: UFix64): @{FungibleToken.Vault} {
-            let _token = tokenType
-            let _amt = amount
-            panic("not implemented")
-        }
-    }
+    /// resource (or an authorized reference) is proof of ownership for withdrawals.
+    /// The resource itself stores no funds; all custody lives in the pool.
+    ///
+    /// TODO(jord): get feedback on this approach. Alternative is Position holds a
+    ///             reference to the pool and can provide withdraw etc. functions itself.
+    access(all) resource Position {}
 
     init() {
         self.PoolStoragePath = /storage/FlowALPPool
