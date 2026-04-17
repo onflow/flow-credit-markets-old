@@ -16,6 +16,7 @@ access(all) fun beforeEach() { Test.reset(to: snapshot) }
 
 access(all) fun setup() {
     deploy("cadence/contracts/actions/FlowActions.cdc")
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
     Test.expect(Test.deployContract(
         name: "FlowYieldVaults",
             path: "cadence/tests/mocks/MockFlowYieldVaults.cdc",
@@ -29,7 +30,7 @@ access(all) fun setup() {
 
 access(all) fun test_no_pass() {
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: defaultPath),
+        createYieldVault(signer: userA, name: "mock", path: defaultPath),
         errorMessageSubstring: "No valid early access pass"
     )
 }
@@ -38,9 +39,9 @@ access(all) fun test_grant() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
     Test.assert(hasEarlyAccess(userA.address))
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: defaultPath), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: defaultPath), Test.beSucceeded())
     expectFailedWithError(
-        createYieldVault(signer: userB, strategyID: 0, path: defaultPath),
+        createYieldVault(signer: userB, name: "mock", path: defaultPath),
         errorMessageSubstring: "No valid early access pass"
     )
 }
@@ -52,7 +53,7 @@ access(all) fun test_revoke() {
     Test.expect(revokeEarlyAccess(admin: admin, addr: userA.address), Test.beSucceeded())
     Test.assert(!hasEarlyAccess(userA.address))
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: defaultPath),
+        createYieldVault(signer: userA, name: "mock", path: defaultPath),
         errorMessageSubstring: "No valid early access pass"
     )
 }
@@ -60,7 +61,7 @@ access(all) fun test_revoke() {
 access(all) fun test_use_position_after_revoke() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: defaultPath), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: defaultPath), Test.beSucceeded())
     Test.expect(revokeEarlyAccess(admin: admin, addr: userA.address), Test.beSucceeded())
     Test.expect(deposit(signer: userA, path: defaultPath), Test.beSucceeded())
 }
@@ -76,17 +77,17 @@ access(all) fun test_reissue_replaces_allowance() {
 access(all) fun test_reissue_invalidates_previously_claimed_capability() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
 
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 5), Test.beSucceeded())
 
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: /storage/b),
+        createYieldVault(signer: userA, name: "mock", path: /storage/b),
         errorMessageSubstring: "No valid early access pass"
     )
 
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/b), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/b), Test.beSucceeded())
     Test.assertEqual(4 as UInt64, remainingAllowance(userA.address))
 }
 
@@ -103,23 +104,23 @@ access(all) fun test_revoke_and_re_grant() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
     Test.assert(hasEarlyAccess(userA.address))
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: defaultPath), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: defaultPath), Test.beSucceeded())
 }
 
 access(all) fun test_pass_is_reusable() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/b), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/c), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/b), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/c), Test.beSucceeded())
 }
 
 access(all) fun test_allowance_exhausted() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 1), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: /storage/b),
+        createYieldVault(signer: userA, name: "mock", path: /storage/b),
         errorMessageSubstring: "No remaining allowance"
     )
 }
@@ -129,17 +130,17 @@ access(all) fun test_two_users_independent() {
     Test.expect(grantEarlyAccess(admin: admin, user: userB, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
     Test.expect(claimPass(user: userB, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: defaultPath), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userB, strategyID: 0, path: defaultPath), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: defaultPath), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userB, name: "mock", path: defaultPath), Test.beSucceeded())
     Test.expect(revokeEarlyAccess(admin: admin, addr: userA.address), Test.beSucceeded())
     Test.assert(!hasEarlyAccess(userA.address))
     Test.assert(hasEarlyAccess(userB.address))
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: /storage/a2),
+        createYieldVault(signer: userA, name: "mock", path: /storage/a2),
         errorMessageSubstring: "No valid early access pass"
     )
-    Test.expect(createYieldVault(signer: userB, strategyID: 0, path: /storage/b2), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userB, strategyID: 0, path: /storage/b3), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userB, name: "mock", path: /storage/b2), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userB, name: "mock", path: /storage/b3), Test.beSucceeded())
 }
 
 access(all) fun test_remainingPositions_reflects_allowance() {
@@ -150,21 +151,21 @@ access(all) fun test_remainingPositions_reflects_allowance() {
 access(all) fun test_remainingPositions_decrements_on_createYieldVault() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
     Test.assertEqual(2 as UInt64, remainingAllowance(userA.address))
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/b), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/b), Test.beSucceeded())
     Test.assertEqual(1 as UInt64, remainingAllowance(userA.address))
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/c), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/c), Test.beSucceeded())
     Test.assertEqual(0 as UInt64, remainingAllowance(userA.address))
 }
 
 access(all) fun test_remainingPositions_is_zero_after_exhausted() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 1), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
     Test.assertEqual(0 as UInt64, remainingAllowance(userA.address))
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: /storage/b),
+        createYieldVault(signer: userA, name: "mock", path: /storage/b),
         errorMessageSubstring: "No remaining allowance"
     )
 }
@@ -179,7 +180,7 @@ access(all) fun test_remainingPositions_two_users_independent() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 5), Test.beSucceeded())
     Test.expect(grantEarlyAccess(admin: admin, user: userB, allowance: 2), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
     Test.assertEqual(4 as UInt64, remainingAllowance(userA.address))
     Test.assertEqual(2 as UInt64, remainingAllowance(userB.address))
 }
@@ -190,8 +191,8 @@ access(all) fun test_setAllowance() {
     Test.expect(setAllowance(admin: admin, addr: userA.address, newAllowance: 5), Test.beSucceeded())
     Test.assertEqual(5 as UInt64, remainingAllowance(userA.address))
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/b), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/b), Test.beSucceeded())
     Test.assertEqual(3 as UInt64, remainingAllowance(userA.address))
 }
 
@@ -202,7 +203,7 @@ access(all) fun test_setAllowance_to_zero_blocks_createYieldVault() {
     Test.assert(hasEarlyAccess(userA.address))
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: defaultPath),
+        createYieldVault(signer: userA, name: "mock", path: defaultPath),
         errorMessageSubstring: "No remaining allowance"
     )
 }
@@ -228,7 +229,7 @@ access(all) fun test_revoke_events() {
 access(all) fun test_used_events() {
     Test.expect(grantEarlyAccess(admin: admin, user: userA, allowance: 3), Test.beSucceeded())
     Test.expect(claimPass(user: userA, provider: admin.address), Test.beSucceeded())
-    Test.expect(createYieldVault(signer: userA, strategyID: 0, path: /storage/a), Test.beSucceeded())
+    Test.expect(createYieldVault(signer: userA, name: "mock", path: /storage/a), Test.beSucceeded())
     let events = Test.eventsOfType(Type<FlowYieldVaultsEarlyAccess.PassUsed>())
     Test.assertEqual(1, events.length)
     let ev = events[0] as! FlowYieldVaultsEarlyAccess.PassUsed
@@ -250,11 +251,11 @@ access(all) fun test_claim_with_custom_path() {
     let customPath = /storage/myCustomEarlyAccessPath
     Test.expect(claimPassWithPath(user: userA, provider: admin.address, path: customPath), Test.beSucceeded())
     expectFailedWithError(
-        createYieldVault(signer: userA, strategyID: 0, path: defaultPath),
+        createYieldVault(signer: userA, name: "mock", path: defaultPath),
         errorMessageSubstring: "No valid early access pass"
     )
     Test.expect(
-        createYieldVaultAtEarlyAccessPath(signer: userA, strategyID: 0, earlyAccessPath: customPath, vaultPath: defaultPath),
+        createYieldVaultAtEarlyAccessPath(signer: userA, name: "mock", earlyAccessPath: customPath, vaultPath: defaultPath),
         Test.beSucceeded()
     )
 }
