@@ -44,4 +44,10 @@ access(self) fun deploy(_ path: String) {
     let name = filename.slice(from: 0, upTo: filename.length - 4) // strip ".cdc"
     err = Test.deployContract(name: name, path: path, arguments: [])
     Test.expect(err, Test.beNil())
+    err = Test.deployContract(
+        name: "FlowYieldVaultsEarlyAccess",
+        path: "../contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc",
+        arguments: []
+    )
+    Test.expect(err, Test.beNil())
 }
