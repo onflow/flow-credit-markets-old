@@ -1,13 +1,12 @@
 import "FungibleToken"
-import "FlowActions"
 
 access(all) contract interface FlowYieldVaultsInterfaces {
 
     access(all) struct interface Strategy {
-        access(all) fun createStrategyVault(strategyID: UInt64): @{StrategyVault}
+        access(all) fun createYieldVault(strategyID: UInt64): @{YieldVault}
     }
 
-    access(all) resource interface StrategyVault: FungibleToken.Provider, FungibleToken.Receiver {}
+    access(all) resource interface YieldVault: FungibleToken.Provider, FungibleToken.Receiver {}
 
-    access(all) fun createStrategyVault(strategyID: UInt64): @{StrategyVault}
+    access(account) fun createYieldVault(strategyID: UInt64): @{YieldVault}
 }

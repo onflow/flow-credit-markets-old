@@ -53,6 +53,15 @@
 				"testing": "0000000000000007",
 				"testnet": "0000000000000007"
 			}
+		},
+		"MockFlowYieldVaults": {
+			"source": "cadence/tests/mocks/MockFlowYieldVaults.cdc",
+			"aliases": {
+				"emulator": "0000000000000007",
+				"mainnet": "0000000000000007",
+				"testing": "0000000000000007",
+				"testnet": "0000000000000007"
+			}
 		}
 	},
 	"dependencies": {

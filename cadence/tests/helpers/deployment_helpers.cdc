@@ -36,18 +36,13 @@ access(all) fun deployFlowYieldVaults() {
     yieldVaultsDeployed = true
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaults.cdc")
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
 }
 
-access(self) fun deploy(_ path: String) {
+access(all) fun deploy(_ path: String) {
     let parts = path.split(separator: "/")
     let filename = parts[parts.length - 1]
     let name = filename.slice(from: 0, upTo: filename.length - 4) // strip ".cdc"
     err = Test.deployContract(name: name, path: path, arguments: [])
-    Test.expect(err, Test.beNil())
-    err = Test.deployContract(
-        name: "FlowYieldVaultsEarlyAccess",
-        path: "../contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc",
-        arguments: []
-    )
     Test.expect(err, Test.beNil())
 }

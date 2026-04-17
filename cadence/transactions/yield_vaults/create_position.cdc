@@ -1,19 +1,22 @@
 import "FlowYieldVaultsEarlyAccess"
+import "FlowYieldVaultsInterfaces"
 
-transaction(path: StoragePath) {
-    // Two fields are intentional: createPosition requires &Account (non-auth) for the allowlist
-    // check, while saving requires auth(Storage). Both must be captured in prepare since
-    // auth capabilities cannot be obtained outside of that phase.
-    let signer: &Account
-    let signerStorage: auth(Storage) &Account
-
+/// Creates a new yield vault using the signer's early access pass.
+/// Panics if no valid pass capability is found or the pass allowance is exhausted.
+///
+/// **Parameters**
+/// - `strategyID`: Identifies the vault strategy to create a vault for.
+/// - `earlyAccessPath`: Storage path of the pass capability; defaults to
+///   `FlowYieldVaultsEarlyAccess.passCapabilityStoragePath` when `nil`.
+/// - `vaultPath`: Storage path where the new `YieldVault` will be saved.
+transaction(strategyID: UInt64, earlyAccessPath: StoragePath?, vaultPath: StoragePath) {
     prepare(signer: auth(Storage) &Account) {
-        self.signer = signer
-        self.signerStorage = signer
-    }
-
-    execute {
-        let pm <- FlowYieldVaultsEarlyAccess.createPosition(signer: self.signer)
-        self.signerStorage.storage.save(<-pm, to: path)
+        let earlyAccessPath = earlyAccessPath ?? FlowYieldVaultsEarlyAccess.passCapabilityStoragePath
+        let cap = signer.storage.copy<Capability<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>>(
+            from: earlyAccessPath
+        ) ?? panic("No valid early access pass")
+        let pass = cap.borrow() ?? panic("No valid early access pass")
+        let vault <- pass.createYieldVault(strategyID: strategyID)
+        signer.storage.save(<- vault, to: vaultPath)
     }
 }
