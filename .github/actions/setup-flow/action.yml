@@ -7,7 +7,13 @@ runs:
     - name: Get latest Flow CLI version
       id: flow-version
       shell: bash
-      run: echo "version=$(curl -s https://api.github.com/repos/onflow/flow-cli/releases/latest | jq -r .tag_name)" >> $GITHUB_OUTPUT
+      run: |
+        VERSION=$(curl -fsSL --retry 3 --retry-delay 2 https://api.github.com/repos/onflow/flow-cli/releases/latest | jq -r .tag_name)
+        if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+          echo "Failed to fetch Flow CLI version" >&2
+          exit 1
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
 
     - uses: actions/cache@v5
       with:
@@ -23,7 +29,7 @@ runs:
       shell: bash
       run: |
         if ! test -f "$HOME/.local/bin/flow"; then
-          sh -ci "$(curl -fsSL https://raw.githubusercontent.com/onflow/flow-cli/master/install.sh)"
+          sh -c "$(curl -fsSL --retry 3 --retry-delay 2 https://raw.githubusercontent.com/onflow/flow-cli/master/install.sh)"
           echo "Installed Flow CLI $("$HOME/.local/bin/flow" version)"
         else
           echo "Restored Flow CLI from cache"
