@@ -10,7 +10,7 @@
 			}
 		},
 		"FlowActions": {
-			"source": "cadence/contracts/FlowActions.cdc",
+			"source": "cadence/contracts/actions/FlowActions.cdc",
 			"aliases": {
 				"emulator": "0000000000000007",
 				"mainnet": "0000000000000007",
