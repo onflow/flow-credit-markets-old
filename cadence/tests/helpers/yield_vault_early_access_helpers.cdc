@@ -56,18 +56,18 @@ access(all) fun setAllowance(admin: Test.TestAccount, passUUID: UInt64, newAllow
     )
 }
 
-access(all) fun createYieldVault(signer: Test.TestAccount, strategyID: UInt64, path: StoragePath): Test.TransactionResult {
+access(all) fun createYieldVault(signer: Test.TestAccount, name: String, path: StoragePath): Test.TransactionResult {
     return executeTransaction(
         "cadence/transactions/yield_vaults/create_position.cdc",
-        [strategyID, nil, path],
+        [name, nil, path],
         signer
     )
 }
 
-access(all) fun createYieldVaultAtEarlyAccessPath(signer: Test.TestAccount, strategyID: UInt64, earlyAccessPath: StoragePath, vaultPath: StoragePath): Test.TransactionResult {
+access(all) fun createYieldVaultAtEarlyAccessPath(signer: Test.TestAccount, name: String, earlyAccessPath: StoragePath, vaultPath: StoragePath): Test.TransactionResult {
     return executeTransaction(
         "cadence/transactions/yield_vaults/create_position.cdc",
-        [strategyID, earlyAccessPath, vaultPath],
+        [name, earlyAccessPath, vaultPath],
         signer
     )
 }

@@ -32,14 +32,14 @@ access(all) contract FlowYieldVaultsEarlyAccess {
         /// Panics if allowance is exhausted.
         ///
         /// **Parameters**
-        /// - `strategyID`: Identifies the vault strategy to create.
+        /// - `name`: Name of the registered strategy to create a vault for.
         ///
         /// **Returns** A new `YieldVault` to be saved in the caller's storage.
-        access(all) fun createYieldVault(strategyID: UInt64): @{FlowYieldVaultsInterfaces.YieldVault} {
+        access(all) fun createYieldVault(name: String): @{FlowYieldVaultsInterfaces.YieldVault} {
             pre { self.remainingAllowance > 0: "No remaining allowance" }
             self.remainingAllowance = self.remainingAllowance - 1
             let fyv = FlowYieldVaultsEarlyAccess.getFlowYieldVaultsContract()
-            let vault <- fyv.createYieldVault(strategyID: strategyID)
+            let vault <- fyv.createYieldVault(name: name)
             emit PassUsed(passUUID: self.uuid, remainingAllowance: self.remainingAllowance)
             return <- vault
         }

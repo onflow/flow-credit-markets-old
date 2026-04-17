@@ -45,8 +45,8 @@
 				"testnet": "0000000000000007"
 			}
 		},
-		"MockContract": {
-			"source": "cadence/tests/mocks/MockContract.cdc",
+		"MockFlowYieldVaults": {
+			"source": "cadence/tests/mocks/MockFlowYieldVaults.cdc",
 			"aliases": {
 				"emulator": "0000000000000007",
 				"mainnet": "0000000000000007",
@@ -54,8 +54,8 @@
 				"testnet": "0000000000000007"
 			}
 		},
-		"MockFlowYieldVaults": {
-			"source": "cadence/tests/mocks/MockFlowYieldVaults.cdc",
+		"MockStrategy": {
+			"source": "cadence/tests/mocks/MockStrategy.cdc",
 			"aliases": {
 				"emulator": "0000000000000007",
 				"mainnet": "0000000000000007",

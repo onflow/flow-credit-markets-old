@@ -27,8 +27,8 @@ access(all) contract MockFlowYieldVaults: FlowYieldVaultsInterfaces {
         }
     }
 
-    access(account) fun createYieldVault(strategyID: UInt64): @{FlowYieldVaultsInterfaces.YieldVault} {
-        let _ = strategyID
+    access(account) fun createYieldVault(name: String): @{FlowYieldVaultsInterfaces.YieldVault} {
+        let _ = name
         return <- create YieldVault()
     }
 }
