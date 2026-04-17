@@ -17,44 +17,10 @@ make test
 
 ---
 
-## Project Structure
+## Project Layout
 
-```
-cadence/
-├── contracts/
-│   ├── actions/
-│   │   └── FlowActions.cdc                 # Reusable Interfaces
-│   ├── alp/
-│   │   └── FlowALP.cdc                     # Active Lending Protocol
-│   └── yield_vaults/
-│       ├── FlowYieldVaults.cdc             # Yield Vault
-│       └── FlowYieldVaultsEarlyAccess.cdc  # Allowlist gate for early access
-│
-├── scripts/                                # Production scripts
-│   ├── actions/
-│   ├── alp/
-│   └── yield_vaults/
-│
-├── transactions/                           # Production transactions
-│   ├── actions/
-│   ├── alp/
-│   └── yield_vaults/
-│
-└── tests/
-    ├── helpers/                            # Shared test utilities
-    ├── mocks/                              # Mock contracts for isolated unit tests
-    ├── scripts/                            # Scripts used only in tests
-    │   ├── actions/
-    │   ├── alp/
-    │   └── yield_vaults/
-    ├── transactions/                       # Transactions used only in tests
-    │   ├── actions/
-    │   ├── alp/
-    │   └── yield_vaults/
-    └── *_test.cdc                          # Test suites
-
-docs/                                       # Design specs and architecture notes
-```
+- `cadence/transactions/` and `cadence/scripts/` — production transactions and scripts only
+- `cadence/tests/transactions/` and `cadence/tests/scripts/` — test-only helpers, not for production use
 
 ## Writing tests
 
