@@ -55,3 +55,28 @@ cadence/
 
 docs/                                       # Design specs and architecture notes
 ```
+
+## Writing tests
+
+Tests live in `cadence/tests/` as `*_test.cdc` files.
+
+Use the snapshot pattern to reset blockchain state between tests without redeploying contracts:
+
+```cadence
+import Test
+import BlockchainHelpers
+
+access(all) var snapshot: UInt64 = 0
+
+access(all) fun beforeEach() {
+    if snapshot != getCurrentBlockHeight() {
+        Test.reset(to: snapshot)
+    }
+}
+
+access(all) fun setup() {
+    // deploy contracts
+    // setup code every test case needs
+    snapshot = getCurrentBlockHeight()
+}
+```
