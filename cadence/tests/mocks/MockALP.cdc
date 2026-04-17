@@ -3,25 +3,41 @@ import "FlowActionsIdea"
 import "FlowALPInterfaceIdea"
 import "FlowALPTypesIdea"
 
-// -----------------------------------------------------------------------------
-// ⚠️  DISCLAIMER — DRAFT / SUBJECT TO CHANGE
-// -----------------------------------------------------------------------------
-// This is a placeholder ALP implementation that exists only to unblock the
-// FlowYieldVaults lending-strategy prototype. Every method is a stub — the
-// real lending-market logic will replace this whole contract. Do not build on
-// it outside of this repo.
-// -----------------------------------------------------------------------------
-
-access(all) contract FlowALP: FlowALPInterfaceIdea {
+/// Test-only mock of `FlowALPInterfaceIdea`. Unlike `FlowALP`, this impl
+/// actually holds deposited vaults per type and returns them on `withdraw`,
+/// so tests can assert on real balance round-trips.
+access(all) contract MockALP: FlowALPInterfaceIdea {
 
     access(all) resource Position: FlowALPInterfaceIdea.ALPPosition {
+        access(self) let vaults: @{Type: {FungibleToken.Vault}}
+
+        init() {
+            self.vaults <- {}
+        }
+
         access(all) fun deposit(from: @{FungibleToken.Vault}) {
-            destroy from
+            let type = from.getType()
+            let existing <- self.vaults.remove(key: type)
+            if existing == nil {
+                destroy existing
+                self.vaults[type] <-! from
+                return
+            }
+            let held <- existing!
+            held.deposit(from: <- from)
+            self.vaults[type] <-! held
         }
 
         access(all) fun withdraw(type: Type, amount: UFix64): @{FungibleToken.Vault} {
-            let _ = amount
-            return <- FlowActionsIdea.getEmptyVault(type)
+            let held <- self.vaults.remove(key: type)
+            if held == nil {
+                destroy held
+                return <- FlowActionsIdea.getEmptyVault(type)
+            }
+            let h <- held!
+            let out <- h.withdraw(amount: amount)
+            self.vaults[type] <-! h
+            return <- out
         }
 
         access(all) view fun depositRequiredForMinHealth(type: Type, minHealth: UFix64): UFix64 {
