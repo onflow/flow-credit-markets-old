@@ -6,22 +6,22 @@
 During the launch phase, yield vault creation must be restricted to vetted participants. An open deployment would expose the protocol to malicious actors before the system has been stress-tested in production. Participants are semi-trusted — we can reasonably assume they will not behave maliciously.
 
 ### Goal
-Gate yield vault creation behind an allowlist curated by us. Each approved participant receives access to an `EarlyAccessPass` with a finite allowance controlling how many vaults they may create. This limits exposure in the event of a leaked capability: the blast radius is bounded by the allowance on that specific pass and the capital permitted per vault.
+Gate yield vault creation behind an allowlist curated by us. Each approved participant receives one `EarlyAccessPass` with an allowance — a fixed number of yield vaults they may create. One pass equals one participant; the allowance is the cap on how many vaults that participant can open. If a participant misbehaves, the admin revokes their pass, immediately blocking any further vault creation. This limits exposure in the event of a leaked capability: the blast radius is bounded by the allowance on that specific pass and the capital permitted per vault.
 
 ### Lifetime
-This is a **temporary** restriction. `FlowYieldVaultsEarlyAccess` is a thin wrapper over the core vault interfaces with no state in the underlying contracts. Removing early access requires deploying a new contract that implements `FlowYieldVaultsInterfaces` without the gate and updating callers to use it — no changes to vault logic.
+This is a **temporary** restriction. `FlowYieldVaultsEarlyAccess` is a thin wrapper over the core vault interfaces with no state in the underlying contracts. Removing early access requires updating the contract that implements `FlowYieldVaultsInterfaces` without the `access(account)` gate on `fun createYieldVault`. After that, vault creation is open to anyone — no pass and no allowance required. `FlowYieldVaultsEarlyAccess` remains deployed but becomes a dead entrypoint; existing passes are irrelevant since users will interact with the new open contract directly.
 
 ## Nomenclature
 
 | Term | Definition |
 | :--- | :--------- |
-| **Vault** (`YieldVault`) | A Cadence resource representing a yield-generating position. Implements `FungibleToken.Provider` and `FungibleToken.Receiver`. |
+| **Vault** (`YieldVault`) | A Cadence resource representing a yield-generating position. |
 | **Pass** (`EarlyAccessPass`) | A Cadence resource stored in contract account storage. Represents a grant of vault-creation rights. Never held by the user directly. |
 | **Access to a pass** (`Capability<&EarlyAccessPass>`) | A capability pointing to a pass. The only object the user holds. Grants access to `access(all)` functions on the pass, which includes `createYieldVault`. Becomes dead (unborrow-able) when the underlying pass is destroyed. |
 | **passUUID** | The unique identifier of a pass, assigned by the Cadence runtime at creation. Used to reference a pass in all admin operations. Emitted in `PassIssued`. |
 | **Allowance** (`remainingAllowance`) | The number of vaults the holder of access to a pass may still create. |
 | **strategyID** | An identifier passed to `createYieldVault` that selects which yield strategy the vault should use. Defined by the underlying `FlowYieldVaultsInterfaces` implementation. |
-| **Admin** | The contract account. The only account that can issue, revoke, and adjust passes. |
+| **Admin** | The holder of the `Admin` resource. After deployment this is the deploying account. The `Admin` resource can be moved to transfer admin rights. |
 
 ## How it works
 
