@@ -1,12 +1,35 @@
 # Flow Yield Vaults — Early Access
 
-Gates all yield vault creation to a manually approved allowlist. Only accounts that hold a valid `EarlyAccessPass` capability can create vaults, and each pass carries a finite allowance that decrements on use.
+## Overview
 
-<img src="flow_yield_vaults_early_access_structure.svg" width="800" alt="Architecture" />
+### Problem
+During the launch phase, yield vault creation must be restricted to vetted participants. An open deployment would expose the protocol to malicious actors before the system has been stress-tested in production. Participants are semi-trusted — we can reasonably assume they will not behave maliciously.
+
+### Goal
+Gate yield vault creation behind an allowlist curated by us. Each approved participant receives access to an `EarlyAccessPass` with a finite allowance controlling how many vaults they may create. This limits exposure in the event of a leaked capability: the blast radius is bounded by the allowance on that specific pass and the capital permitted per vault.
+
+### Lifetime
+This is a **temporary** restriction. `FlowYieldVaultsEarlyAccess` is a thin wrapper over the core vault interfaces with no state in the underlying contracts. Removing early access requires deploying a new contract that implements `FlowYieldVaultsInterfaces` without the gate and updating callers to use it — no changes to vault logic.
+
+## Nomenclature
+
+| Term | Definition |
+| :--- | :--------- |
+| **Vault** (`YieldVault`) | A Cadence resource representing a yield-generating position. Implements `FungibleToken.Provider` and `FungibleToken.Receiver`. |
+| **Pass** (`EarlyAccessPass`) | A Cadence resource stored in contract account storage. Represents a grant of vault-creation rights. Never held by the user directly. |
+| **Access to a pass** (`Capability<&EarlyAccessPass>`) | A capability pointing to a pass. The only object the user holds. Grants access to `access(all)` functions on the pass, which includes `createYieldVault`. Becomes dead (unborrow-able) when the underlying pass is destroyed. |
+| **passUUID** | The unique identifier of a pass, assigned by the Cadence runtime at creation. Used to reference a pass in all admin operations. Emitted in `PassIssued`. |
+| **Allowance** (`remainingAllowance`) | The number of vaults the holder of access to a pass may still create. |
+| **strategyID** | An identifier passed to `createYieldVault` that selects which yield strategy the vault should use. Defined by the underlying `FlowYieldVaultsInterfaces` implementation. |
+| **Admin** | The contract account. The only account that can issue, revoke, and adjust passes. |
 
 ## How it works
 
+<img src="flow_yield_vaults_early_access_structure.svg" width="800" alt="Architecture" />
+
 The contract stores every `EarlyAccessPass` resource in the contract account. The admin issues a pass and publishes a capability to the recipient's inbox. The user claims it into their own storage and then calls through it to create yield vaults.
+
+### Issuance and vault creation flow
 
 ```mermaid
 sequenceDiagram
@@ -26,18 +49,45 @@ sequenceDiagram
     Contract-->>User: @YieldVault
 ```
 
+### Pass lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Issued: issuePass
+    Issued --> Claimed: claimPass
+    Issued --> Revoked: revokePass
+    Claimed --> Exhausted: allowance = 0
+    Exhausted --> Claimed: setAllowance
+    Exhausted --> Revoked: revokePass
+    Claimed --> Revoked: revokePass
+    Revoked --> [*]
+```
+
+`Claimed → Exhausted` is triggered by `createYieldVault` when allowance reaches 0, or directly by `setAllowance(0)`. `Exhausted → Claimed` is triggered by `setAllowance(n > 0)`. Revoked is terminal — no transition out.
+
+## Invariants
+
+The implementation must maintain the following invariants at all times:
+
+- **(I)** The total number of `YieldVault`s created through pass P never exceeds the allowance set for P at its most recent `issuePass` or `setAllowance` call.
+- **(II)** A `YieldVault` can only be created by an account holding a live capability to a pass P that was issued by the admin and has not been revoked.
+- **(III)** An `EarlyAccessPass` resource never exists outside contract account storage.
+- **(IV)** The `Admin` resource can only be operated by a transaction signed by the contract account.
+
 ## Security proof
 
 **Theorem.** No account can create a `YieldVault` unless the admin has explicitly issued it an `EarlyAccessPass` with sufficient remaining allowance.
 
-**Proof.** We establish six claims:
+**Proof.** We establish six claims, each proving one of the invariants stated above:
 
-- **Claim 1** — The underlying `createYieldVault` is unreachable by any user transaction directly.
-- **Claim 2** — The only code path to `createYieldVault` passes through an `EarlyAccessPass` resource.
-- **Claim 3** — An `EarlyAccessPass` can only be created by the admin and never leaves contract account storage.
-- **Claim 4** — Only the intended recipient can obtain a capability to a given pass.
-- **Claim 5** — The total number of vaults created through a pass can never exceed its allowance.
-- **Claim 6** — Only the contract account can perform admin operations.
+- **Claim 1** — The underlying `createYieldVault` is unreachable by any user transaction directly. *(supports II)*
+- **Claim 2** — The only code path to `createYieldVault` passes through an `EarlyAccessPass` resource. *(supports II)*
+- **Claim 3** — An `EarlyAccessPass` can only be created by the admin and never leaves contract account storage. *(establishes III, supports II)*
+- **Claim 4** — Only the intended recipient can obtain access to a given pass. *(supports II)*
+- **Claim 5** — The total number of vaults created through a pass can never exceed its allowance. *(establishes I)*
+- **Claim 6** — Only the contract account can perform admin operations. *(establishes IV)*
+
+Claims 1–4 together establish invariant (II): to create a vault, a caller must hold live access to a pass that the admin issued and has not revoked. Claim 5 establishes invariant (I). Claim 6 establishes invariant (IV). The theorem follows.
 
 ### Claim 1 — The interface boundary (`FlowYieldVaultsInterfaces`)
 
@@ -80,8 +130,7 @@ access(all) resource Admin {
 }
 ```
 
-The resource is only created in one location, immediately moved into contract account storage and never touches user storage. `loadPass` the only location which moves the resource out of storage calls `destroy` on it immediately after.
-A user never has direct access to the resource.
+Cadence restricts `create EarlyAccessPass` to the defining contract — no external code can construct one. The resource is immediately moved into contract account storage and never touches user storage. `loadPass`, the only location that moves the resource out of storage, calls `destroy` immediately after. Once destroyed, any access to that pass returns `nil` on `borrow()`.
 
 ### Claim 4 — The `EarlyAccessPass` capability
 
@@ -96,8 +145,8 @@ access(all) resource Admin {
 }
 ```
 
-The capability is issued in exactly one location. It is published to the inbox addressed to a specific recipient, and no further action is taken with it.
-Only the intended recipient can obtain a capability to the pass.
+The capability is issued in exactly one location. It is published to the inbox addressed to a specific recipient, and no further action is taken with it. Cadence's `inbox.claim` requires the claimer to be the transaction signer matching the recipient address — no third party can intercept it.
+Only the intended recipient can obtain access to the pass.
 
 ### Claim 5 — Only as many vaults can be created as the allowance
 
@@ -122,6 +171,7 @@ access(all) resource EarlyAccessPass {
 access(all) resource Admin {
     access(all) fun issuePass(to addr: Address, allowance: UInt64): UInt64 {
         let pass <- create EarlyAccessPass(allowance: allowance)
+        // ...
     }
 
     access(all) fun setAllowance(passUUID: UInt64, newAllowance: UInt64) {
@@ -146,3 +196,77 @@ access(all) contract FlowYieldVaultsEarlyAccess {
 
 `Admin` is created exactly once in `init` and saved directly to contract account storage. No capability is ever issued for it.
 No external account can perform admin operations.
+
+## Admin operations
+
+### Initial setup
+
+Before any vault can be created, the admin must point the contract at the underlying yield vaults implementation:
+
+```
+setFlowYieldVaults(flowYieldVaultsName: String)
+```
+
+This only needs to be called once (or again if the implementation contract is redeployed).
+
+### Granting access
+
+```
+issuePass(to addr: Address, allowance: UInt64) → passUUID: UInt64
+```
+
+Issues a pass and publishes the capability to `addr`'s inbox. The returned `passUUID` is needed for all subsequent operations on that pass. It is also emitted in the `PassIssued` event — see Monitoring.
+
+### Revoking access
+
+```
+revokePass(passUUID: UInt64)
+```
+
+Destroys the pass resource, immediately invalidating any capability the recipient holds — `borrow()` will return `nil` and all further vault creation attempts will fail. If the pass has not yet been claimed, the inbox entry is also retracted.
+
+### Adjusting allowance
+
+```
+setAllowance(passUUID: UInt64, newAllowance: UInt64)
+```
+
+Replaces the remaining allowance on an existing pass. Can be used to increase, decrease, or set to `0` to temporarily block vault creation without revoking the pass. Setting back to a non-zero value re-enables creation.
+
+### Re-issuing to the same address
+
+Revoking and re-issuing creates an independent new pass with a new `passUUID`. The recipient must claim access to the new pass separately. There is no automatic handover between passes.
+
+## Contract with callers
+
+### Requirements on the admin
+
+- **(A1)** `setFlowYieldVaults` must be called before `issuePass` is first called. Calling `issuePass` before this is set will not fail at issuance but will cause `createYieldVault` to panic at vault creation time.
+- **(A2)** The contract account must not deploy additional contracts that call `access(account)` functions on the underlying vault implementation. Doing so would bypass the gate and violate invariant (II).
+- **(A3)** The contract account's signing key must be kept secure. Compromise of the key grants full admin power.
+
+### Requirements on the user
+
+- **(U1)** The user must claim access to the pass from their inbox before attempting vault creation. Unclaimed access cannot be used.
+- **(U2)** The user must not share their capability with untrusted parties. Any account that can borrow the capability can consume allowance.
+
+## Failure modes
+
+| Condition | Outcome |
+| :-------- | :------ |
+| User never claims access to the pass | Pass remains in contract storage indefinitely; no vault can be created through it. Admin can revoke to clean up. |
+| `setFlowYieldVaults` not called or points to a missing contract | `createYieldVault` panics at vault creation time with "contract not found". Issuance and claiming succeed normally. |
+| Pass revoked before claim | Inbox entry is retracted; user cannot claim access. Vault creation is permanently blocked for that pass. |
+| Pass revoked after claim | Access to the pass becomes dead (`borrow()` returns `nil`); all further vault creation attempts panic. |
+| `setAllowance(0)` called | Vault creation is blocked; capability remains live. Re-enabled by a subsequent `setAllowance` with a non-zero value. |
+| Admin loses `passUUID` | `revokePass` and `setAllowance` cannot be called for that pass. The pass remains valid and the user can continue creating vaults until allowance is exhausted. |
+
+## Monitoring
+
+All significant state changes emit events. Querying the event history is the primary way to read operational state (e.g. which passes have been issued and their UUIDs).
+
+| Event | Fields | Meaning |
+| :---- | :----- | :------ |
+| `PassIssued` | `passUUID`, `addr`, `allowance` | A new pass was issued to `addr` with the given allowance. |
+| `PassRevoked` | `passUUID` | The pass was destroyed; any held capability is now dead. |
+| `PassUsed` | `passUUID`, `remainingAllowance` | A vault was created; `remainingAllowance` reflects the value after decrement. |
