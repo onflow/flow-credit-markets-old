@@ -16,10 +16,10 @@ transaction(passUUID: UInt64, provider: Address, path: StoragePath?) {
             storagePath = p
         }
         let _ = signer.storage.load<Capability<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>>(from: storagePath)
-        let cap = signer.inbox.claim<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>(
+        let capability = signer.inbox.claim<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>(
             FlowYieldVaultsEarlyAccess.inboxName(passUUID: passUUID),
             provider: provider
         ) ?? panic("No pass found in inbox")
-        signer.storage.save(cap, to: storagePath)
+        signer.storage.save(capability, to: storagePath)
     }
 }

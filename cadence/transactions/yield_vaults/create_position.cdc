@@ -12,10 +12,10 @@ import "FlowYieldVaultsInterfaces"
 transaction(strategyID: UInt64, earlyAccessPath: StoragePath?, vaultPath: StoragePath) {
     prepare(signer: auth(Storage) &Account) {
         let earlyAccessPath = earlyAccessPath ?? FlowYieldVaultsEarlyAccess.passCapabilityStoragePath
-        let cap = signer.storage.copy<Capability<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>>(
+        let capability = signer.storage.copy<Capability<&FlowYieldVaultsEarlyAccess.EarlyAccessPass>>(
             from: earlyAccessPath
         ) ?? panic("No valid early access pass")
-        let pass = cap.borrow() ?? panic("No valid early access pass")
+        let pass = capability.borrow() ?? panic("No valid early access pass")
         let vault <- pass.createYieldVault(strategyID: strategyID)
         signer.storage.save(<- vault, to: vaultPath)
     }

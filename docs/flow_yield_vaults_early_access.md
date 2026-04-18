@@ -40,10 +40,10 @@ sequenceDiagram
 
     Admin->>Contract: issuePass(addr, allowance)
     Contract->>Contract: store EarlyAccessPass_<uuid>
-    Contract->>Inbox: publish cap → user inbox
+    Contract->>Inbox: publish capability → user inbox
     User->>Inbox: claim("EarlyAccessPass_<uuid>")
     Inbox-->>User: Capability<&EarlyAccessPass>
-    User->>User: save cap to storage
+    User->>User: save capability to storage
     User->>Contract: createYieldVault(strategyID)
     Contract->>Contract: remainingAllowance -= 1
     Contract-->>User: @YieldVault
