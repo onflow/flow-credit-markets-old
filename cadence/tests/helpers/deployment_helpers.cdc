@@ -16,12 +16,7 @@ access(all) fun deployFlowActions() {
         !actionsDeployed: "FlowActions already deployed"
     }
     actionsDeployed = true
-    err = Test.deployContract(
-        name: "FlowActions",
-        path: "../contracts/actions/FlowActions.cdc",
-        arguments: []
-    )
-    Test.expect(err, Test.beNil())
+    deploy("cadence/contracts/actions/FlowActions.cdc")
 }
 
 access(all) fun deployFlowALP() {
@@ -30,12 +25,7 @@ access(all) fun deployFlowALP() {
         !alpDeployed: "FlowALP already deployed"
     }
     alpDeployed = true
-    err = Test.deployContract(
-        name: "FlowALP",
-        path: "../contracts/alp/FlowALP.cdc",
-        arguments: []
-    )
-    Test.expect(err, Test.beNil())
+    deploy("cadence/contracts/alp/FlowALP.cdc")
 }
 
 access(all) fun deployFlowYieldVaults() {
@@ -44,10 +34,14 @@ access(all) fun deployFlowYieldVaults() {
         !yieldVaultsDeployed: "FlowYieldVaults already deployed"
     }
     yieldVaultsDeployed = true
-    err = Test.deployContract(
-        name: "FlowYieldVaults",
-        path: "../contracts/yield_vaults/FlowYieldVaults.cdc",
-        arguments: []
-    )
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaults.cdc")
+}
+
+access(self) fun deploy(_ path: String) {
+    let parts = path.split(separator: "/")
+    let filename = parts[parts.length - 1]
+    let name = filename.slice(from: 0, upTo: filename.length - 4) // strip ".cdc"
+    err = Test.deployContract(name: name, path: path, arguments: [])
     Test.expect(err, Test.beNil())
 }

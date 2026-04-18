@@ -3,7 +3,7 @@ import Test
 // PLACEHOLDER: wraps the stub count script used to verify CI script execution.
 // Replace alongside scripts/actions/count.cdc once real state exists.
 access(all) fun actionsCount(): Int {
-    let result = _executeScript("../scripts/actions/count.cdc", [])
+    let result = _executeScript("cadence/scripts/actions/count.cdc", [])
     Test.expect(result, Test.beSucceeded())
     return result.returnValue as! Int
 }
@@ -12,7 +12,7 @@ access(all) fun actionsCount(): Int {
 // transaction execution. Replace alongside transactions/actions/increment.cdc
 // once real mutations exist.
 access(all) fun actionsIncrementCount(signer: Test.TestAccount) {
-    let result = _executeTransaction("transactions/actions/increment.cdc", [], signer)
+    let result = _executeTransaction("cadence/tests/transactions/actions/increment.cdc", [], signer)
     Test.expect(result, Test.beSucceeded())
 }
 
