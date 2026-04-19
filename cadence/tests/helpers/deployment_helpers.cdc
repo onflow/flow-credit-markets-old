@@ -26,10 +26,10 @@ access(all) fun deployFlowActions() {
         !actionsDeployed: "FlowActions already deployed"
     }
     actionsDeployed = true
-    deploy("cadence/contracts/actions/FlowActions.cdc")
+    deploy("cadence/contracts/actions/FlowActionsIdea.cdc")
 }
 
-/// Deploys `FlowALP`.
+/// Deploys the `FlowALP` suite (`FlowALP`, `FlowALPHealthWatcher`).
 /// Requires `FlowActions` to be deployed first.
 /// Panics if called more than once.
 access(all) fun deployFlowALP() {
@@ -38,11 +38,16 @@ access(all) fun deployFlowALP() {
         !alpDeployed: "FlowALP already deployed"
     }
     alpDeployed = true
+    deploy("cadence/contracts/alp/FlowALPTypesIdea.cdc")
+    deploy("cadence/contracts/alp/FlowALPInterfaceIdea.cdc")
+    deploy("cadence/contracts/alp/FlowALPHealthWatcherIdea.cdc")
     deploy("cadence/contracts/alp/FlowALP.cdc")
+    deploy("cadence/contracts/alp/FlowALPHealthWatcher.cdc")
 }
 
 /// Deploys the `FlowYieldVaults` suite
-/// (`FlowYieldVaultsInterfaces`, `FlowYieldVaults`, `FlowYieldVaultsEarlyAccess`).
+/// (`FlowYieldVaultsInterfaces`, `FlowYieldVaultsLendingStrategies`,
+/// `FlowYieldVaults`, `FlowYieldVaultsEarlyAccess`).
 /// Requires `FlowActions` and `FlowALP` to be deployed first.
 /// Panics if called more than once.
 access(all) fun deployFlowYieldVaults() {
@@ -53,6 +58,7 @@ access(all) fun deployFlowYieldVaults() {
     }
     yieldVaultsDeployed = true
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsLendingStrategies.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaults.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
 }

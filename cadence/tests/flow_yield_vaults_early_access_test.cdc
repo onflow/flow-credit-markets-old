@@ -15,7 +15,7 @@ access(all) var snapshot: UInt64 = 0
 access(all) fun beforeEach() { Test.reset(to: snapshot) }
 
 access(all) fun setup() {
-    deploy("cadence/contracts/actions/FlowActions.cdc")
+    deploy("cadence/contracts/actions/FlowActionsIdea.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
     deploy("cadence/tests/mocks/MockFlowYieldVaults.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
