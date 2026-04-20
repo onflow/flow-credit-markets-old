@@ -14,6 +14,7 @@ access(all) fun setup() {
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaults.cdc")
     deploy("cadence/tests/mocks/MockStrategy.cdc")
+    deploy("cadence/tests/mocks/TestYieldVaultGateway.cdc")
     snapshot = getCurrentBlockHeight()
 }
 

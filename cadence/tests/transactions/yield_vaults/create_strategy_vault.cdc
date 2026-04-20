@@ -1,16 +1,10 @@
-import "FlowYieldVaults"
+import "TestYieldVaultGateway"
 
 transaction(name: String) {
-
-    let admin: &FlowYieldVaults.Admin
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.admin = signer.storage.borrow<&FlowYieldVaults.Admin>(from: FlowYieldVaults.adminStoragePath)
-            ?? panic("FlowYieldVaults.Admin not found at \(FlowYieldVaults.adminStoragePath)")
-    }
+    prepare(_: &Account) {}
 
     execute {
-        let vault <- self.admin.createYieldVault(name: name)
+        let vault <- TestYieldVaultGateway.createYieldVault(name: name)
         destroy vault
     }
 }

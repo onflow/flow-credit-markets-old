@@ -62,24 +62,18 @@ access(all) contract FlowYieldVaults: FlowYieldVaultsInterfaces {
             }
             emit StrategyRemoved(name: name)
         }
-
-        /// Mints a yield vault from a registered strategy.
-        /// Wrapper around the contract-level `createYieldVault`
-        /// for callers that hold the admin resource.
-        ///
-        /// **Parameters**
-        /// - `name`: Name of the registered strategy.
-        ///
-        /// **Returns** A new `YieldVault` for the caller to save in storage.
-        access(all) fun createYieldVault(name: String): @{FlowYieldVaultsInterfaces.YieldVault} {
-            return <- FlowYieldVaults.createYieldVault(name: name)
-        }
     }
 
     /// Mints a yield vault from a registered strategy.
     /// Panics if no strategy is registered under `name`.
-    /// `access(account)` so that only contracts on this account (e.g.
-    /// `FlowYieldVaultsEarlyAccess`) can gate or invoke vault creation.
+    ///
+    /// **This function will be made `access(all)` once early access ends.**
+    /// The `access(account)` gate is a temporary launch-phase restriction that
+    /// funnels all user-facing vault creation through `FlowYieldVaultsEarlyAccess`.
+    /// Treat this function as if it were already public when reasoning about
+    /// security: it must be safe for any caller to invoke with any registered
+    /// `name`, and downstream logic (strategies, vault resources) must not rely
+    /// on the gate to keep untrusted callers out.
     ///
     /// **Parameters**
     /// - `name`: Name of the registered strategy.

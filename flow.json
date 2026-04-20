@@ -18,15 +18,6 @@
 				"testnet": "0000000000000007"
 			}
 		},
-		"FlowYieldVaultsInterfaces": {
-			"source": "cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc",
-			"aliases": {
-				"emulator": "0000000000000007",
-				"mainnet": "0000000000000007",
-				"testing": "0000000000000007",
-				"testnet": "0000000000000007"
-			}
-		},
 		"FlowYieldVaults": {
 			"source": "cadence/contracts/yield_vaults/FlowYieldVaults.cdc",
 			"aliases": {
@@ -45,6 +36,15 @@
 				"testnet": "0000000000000007"
 			}
 		},
+		"FlowYieldVaultsInterfaces": {
+			"source": "cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc",
+			"aliases": {
+				"emulator": "0000000000000007",
+				"mainnet": "0000000000000007",
+				"testing": "0000000000000007",
+				"testnet": "0000000000000007"
+			}
+		},
 		"MockFlowYieldVaults": {
 			"source": "cadence/tests/mocks/MockFlowYieldVaults.cdc",
 			"aliases": {
@@ -56,6 +56,15 @@
 		},
 		"MockStrategy": {
 			"source": "cadence/tests/mocks/MockStrategy.cdc",
+			"aliases": {
+				"emulator": "0000000000000007",
+				"mainnet": "0000000000000007",
+				"testing": "0000000000000007",
+				"testnet": "0000000000000007"
+			}
+		},
+		"TestYieldVaultGateway": {
+			"source": "cadence/tests/mocks/TestYieldVaultGateway.cdc",
 			"aliases": {
 				"emulator": "0000000000000007",
 				"mainnet": "0000000000000007",
