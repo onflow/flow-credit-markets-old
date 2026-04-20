@@ -1,5 +1,5 @@
 import "FlowYieldVaultsEarlyAccess"
 
-access(all) fun main(passUUID: UInt64): UInt64 {
-    return FlowYieldVaultsEarlyAccess.remainingAllowance(passUUID: passUUID)
+access(all) fun main(addr: Address): UInt64 {
+    return FlowYieldVaultsEarlyAccess.remainingAllowance(addr: addr)
 }

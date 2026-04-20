@@ -1,16 +1,16 @@
 import "FlowYieldVaultsEarlyAccess"
 
-/// Destroys the pass and attempts to retract the inbox capability.
-/// If already claimed, the stored capability becomes invalid, blocking
-/// future vault creation.
+/// Destroys the pass for `addr`, deletes its capability controllers
+/// (invalidating any held capability), and retracts the inbox entry
+/// if still unclaimed.
 ///
 /// **Parameters**
-/// - `passUUID`: UUID of the target pass.
-transaction(passUUID: UInt64) {
+/// - `addr`: Recipient whose pass should be revoked.
+transaction(addr: Address) {
     prepare(admin: auth(Storage) &Account) {
         let handle = admin.storage
             .borrow<&FlowYieldVaultsEarlyAccess.Admin>(from: FlowYieldVaultsEarlyAccess.adminStoragePath)
             ?? panic("Could not borrow Admin")
-        handle.revokePass(passUUID: passUUID)
+        handle.revokePass(addr: addr)
     }
 }

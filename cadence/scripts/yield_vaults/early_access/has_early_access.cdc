@@ -1,5 +1,5 @@
 import "FlowYieldVaultsEarlyAccess"
 
-access(all) fun main(passUUID: UInt64): Bool {
-    return FlowYieldVaultsEarlyAccess.passExists(passUUID: passUUID)
+access(all) fun main(addr: Address): Bool {
+    return FlowYieldVaultsEarlyAccess.passExists(addr: addr)
 }

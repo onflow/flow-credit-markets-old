@@ -1,28 +1,28 @@
 import "FlowYieldVaults"
 
 /// Gates yield vault creation during the early access period.
-/// An `Admin` resource issues and manages `EarlyAccessPass` resources.
+/// An `Admin` resource issues and manages `EarlyAccessPass` resources,
+/// keyed by recipient address: each address has at most one pass.
 /// Pass holders call `createYieldVault` to create yield vaults
 /// until their allowance is exhausted.
 access(all) contract FlowYieldVaultsEarlyAccess {
 
-    /// Emitted when a new pass is issued to an address.
-    access(all) event PassIssued(passUUID: UInt64, addr: Address, allowance: UInt64)
+    /// Emitted when a pass is issued (or re-issued) to an address.
+    access(all) event PassIssued(addr: Address, allowance: UInt64)
     /// Emitted when a pass is revoked and destroyed by the admin.
-    access(all) event PassRevoked(passUUID: UInt64)
+    access(all) event PassRevoked(addr: Address)
     /// Emitted when a pass is used to create a yield vault.
-    access(all) event PassUsed(passUUID: UInt64, remainingAllowance: UInt64)
+    access(all) event PassUsed(addr: Address, remainingAllowance: UInt64)
 
     /// Storage path where the `Admin` resource is saved.
     access(all) let adminStoragePath: StoragePath
     /// Storage path where pass capabilities are stored for claiming.
     access(all) let passCapabilityStoragePath: StoragePath
-    /// Tracks the UUID of the last pass issued to each address;
-    /// used by the address-based claim transaction.
-    access(all) var mostRecentIssuedPassUUID: {Address: UInt64}
 
     /// Held in the holder's storage; gates yield vault creation during early access.
     access(all) resource EarlyAccessPass {
+        /// Address this pass was issued to; stamped at creation and never changes.
+        access(all) let addr: Address
         /// Number of yield vaults the holder may still create.
         access(all) var remainingAllowance: UInt64
 
@@ -37,7 +37,7 @@ access(all) contract FlowYieldVaultsEarlyAccess {
             pre { self.remainingAllowance > 0: "No remaining allowance" }
             self.remainingAllowance = self.remainingAllowance - 1
             let vault <- FlowYieldVaults.createYieldVault(strategyID: strategyID)
-            emit PassUsed(passUUID: self.uuid, remainingAllowance: self.remainingAllowance)
+            emit PassUsed(addr: self.addr, remainingAllowance: self.remainingAllowance)
             return <- vault
         }
 
@@ -45,124 +45,130 @@ access(all) contract FlowYieldVaultsEarlyAccess {
             self.remainingAllowance = newAllowance
         }
 
-        init(allowance: UInt64) {
+        init(addr: Address, allowance: UInt64) {
+            self.addr = addr
             self.remainingAllowance = allowance
         }
     }
 
     access(all) resource Admin {
-        /// Issues a pass to `addr`, publishes the capability to their inbox,
-        /// and records it as their most recently issued pass
-        /// (used by the address-based claim transaction).
+        /// Issues a pass to `addr` and publishes the capability to their inbox.
+        /// If a pass already exists for `addr`, its `remainingAllowance` is
+        /// replaced with the new `allowance`, and any previously issued
+        /// capabilities for that pass are invalidated.
         ///
         /// **Parameters**
         /// - `addr`: Recipient who will claim the pass from their inbox.
         /// - `allowance`: Number of yield vaults the pass holder may create.
-        ///
-        /// **Returns** The UUID of the newly created pass.
-        access(all) fun issuePass(to addr: Address, allowance: UInt64): UInt64 {
-            let pass <- create EarlyAccessPass(allowance: allowance)
-            let passUUID = FlowYieldVaultsEarlyAccess.storePass(pass: <- pass)
-            FlowYieldVaultsEarlyAccess.publishPassCapability(passUUID: passUUID, addr: addr)
-            FlowYieldVaultsEarlyAccess.mostRecentIssuedPassUUID[addr] = passUUID
-            emit PassIssued(passUUID: passUUID, addr: addr, allowance: allowance)
-            return passUUID
+        access(all) fun issuePass(to addr: Address, allowance: UInt64) {
+            let path = FlowYieldVaultsEarlyAccess.passStoragePath(addr: addr)
+            if FlowYieldVaultsEarlyAccess.checkPass(addr: addr) {
+                let pass = FlowYieldVaultsEarlyAccess.borrowPass(addr: addr)
+                pass.setAllowance(allowance)
+                FlowYieldVaultsEarlyAccess.deletePassCapabilities(addr: addr)
+            } else {
+                let pass <- create EarlyAccessPass(addr: addr, allowance: allowance)
+                FlowYieldVaultsEarlyAccess.account.storage.save(<- pass, to: path)
+            }
+            FlowYieldVaultsEarlyAccess.publishPassCapability(addr: addr)
+            emit PassIssued(addr: addr, allowance: allowance)
         }
 
-        /// Destroys the pass and attempts to retract the inbox capability.
-        /// Panics if the pass is not found. If already claimed, the capability
-        /// stays in the recipient's storage but becomes unborrow-able,
-        /// blocking future vault creation.
+        /// Destroys the pass, deletes its capability controllers, and retracts
+        /// the inbox entry if still unclaimed. Panics if no pass exists for `addr`.
+        /// Any previously claimed capability becomes dead (`borrow()` returns `nil`).
         ///
         /// **Parameters**
-        /// - `passUUID`: UUID of the target pass.
-        access(all) fun revokePass(passUUID: UInt64) {
-            let pass <- FlowYieldVaultsEarlyAccess.loadPass(passUUID: passUUID)
+        /// - `addr`: Recipient whose pass should be revoked.
+        access(all) fun revokePass(addr: Address) {
+            let pass <- FlowYieldVaultsEarlyAccess.loadPass(addr: addr)
             destroy pass
-            FlowYieldVaultsEarlyAccess.unpublishPassCapability(passUUID: passUUID)
-            emit PassRevoked(passUUID: passUUID)
+            FlowYieldVaultsEarlyAccess.deletePassCapabilities(addr: addr)
+            FlowYieldVaultsEarlyAccess.unpublishPassCapability(addr: addr)
+            emit PassRevoked(addr: addr)
         }
 
         /// Replaces the remaining allowance on an existing pass.
-        /// Panics if the pass is not found.
+        /// Panics if no pass exists for `addr`.
         ///
         /// **Parameters**
-        /// - `passUUID`: UUID of the target pass.
+        /// - `addr`: Recipient whose pass allowance should be updated.
         /// - `newAllowance`: New vault budget; `0` immediately blocks creation.
-        access(all) fun setAllowance(passUUID: UInt64, newAllowance: UInt64) {
-            let pass = FlowYieldVaultsEarlyAccess.borrowPass(passUUID: passUUID)
+        access(all) fun setAllowance(addr: Address, newAllowance: UInt64) {
+            let pass = FlowYieldVaultsEarlyAccess.borrowPass(addr: addr)
             pass.setAllowance(newAllowance)
         }
 
     }
 
-    /// Returns whether a pass with the given UUID currently exists in storage.
+    /// Returns whether a pass is currently held for the given address.
     ///
     /// **Parameters**
-    /// - `passUUID`: UUID of the target pass.
+    /// - `addr`: Recipient to check.
     ///
-    /// **Returns** `true` if the pass exists, `false` otherwise.
-    view access(all) fun passExists(passUUID: UInt64): Bool {
-        return self.checkPass(passUUID: passUUID)
+    /// **Returns** `true` if a pass exists for `addr`, `false` otherwise.
+    view access(all) fun passExists(addr: Address): Bool {
+        return self.checkPass(addr: addr)
     }
 
-    /// Returns the remaining allowance of the pass with the given UUID.
-    /// Panics if the pass is not found.
+    /// Returns the remaining allowance of the pass issued to `addr`.
+    /// Panics if no pass exists for `addr`.
     ///
     /// **Parameters**
-    /// - `passUUID`: UUID of the target pass.
+    /// - `addr`: Recipient whose pass to query.
     ///
     /// **Returns** Number of yield vaults the pass holder may still create.
-    view access(all) fun remainingAllowance(passUUID: UInt64): UInt64 {
-        let pass = self.borrowPass(passUUID: passUUID)
+    view access(all) fun remainingAllowance(addr: Address): UInt64 {
+        let pass = self.borrowPass(addr: addr)
         return pass.remainingAllowance
     }
 
-    /// Returns the inbox key used to publish and claim a pass capability.
+    /// Returns the inbox key used to publish and claim a pass capability
+    /// for the given address.
     ///
     /// **Parameters**
-    /// - `passUUID`: UUID of the target pass.
+    /// - `addr`: Recipient whose inbox entry name to compute.
     ///
-    /// **Returns** The inbox key string for the given pass.
-    view access(all) fun inboxName(passUUID: UInt64): String {
-        return "EarlyAccessPass_\(passUUID)"
+    /// **Returns** The inbox key string for the given address.
+    view access(all) fun inboxName(addr: Address): String {
+        return "EarlyAccessPass_\(addr.toString())"
     }
 
-    access(self) fun storePass(pass: @EarlyAccessPass): UInt64 {
-        let uuid = pass.uuid
-        self.account.storage.save(<- pass, to: FlowYieldVaultsEarlyAccess.passStoragePath(passUUID: uuid))
-        return uuid
+    access(self) fun loadPass(addr: Address): @EarlyAccessPass {
+        return <- (self.account.storage.load<@EarlyAccessPass>(from: self.passStoragePath(addr: addr)) ?? panic("Pass not found"))
     }
 
-    access(self) fun loadPass(passUUID: UInt64): @EarlyAccessPass {
-        return <- (self.account.storage.load<@EarlyAccessPass>(from: self.passStoragePath(passUUID: passUUID)) ?? panic("Pass not found"))
+    view access(self) fun checkPass(addr: Address): Bool {
+        return self.account.storage.check<@EarlyAccessPass>(from: self.passStoragePath(addr: addr))
     }
 
-    view access(self) fun checkPass(passUUID: UInt64): Bool {
-        return self.account.storage.check<@EarlyAccessPass>(from: self.passStoragePath(passUUID: passUUID))
+    view access(self) fun borrowPass(addr: Address): &EarlyAccessPass {
+        return self.account.storage.borrow<&EarlyAccessPass>(from: self.passStoragePath(addr: addr)) ?? panic("Pass not found")
     }
 
-    view access(self) fun borrowPass(passUUID: UInt64): &EarlyAccessPass {
-        return self.account.storage.borrow<&EarlyAccessPass>(from: self.passStoragePath(passUUID: passUUID)) ?? panic("Pass not found")
+    access(self) fun publishPassCapability(addr: Address) {
+        let capability = self.account.capabilities.storage.issue<&EarlyAccessPass>(self.passStoragePath(addr: addr))
+        self.account.inbox.publish(capability, name: self.inboxName(addr: addr), recipient: addr)
     }
 
-    access(self) fun publishPassCapability(passUUID: UInt64, addr: Address) {
-        let capability = self.account.capabilities.storage.issue<&EarlyAccessPass>(self.passStoragePath(passUUID: passUUID))
-        self.account.inbox.publish(capability, name: self.inboxName(passUUID: passUUID), recipient: addr)
+    access(self) fun unpublishPassCapability(addr: Address) {
+        let _ = self.account.inbox.unpublish<&EarlyAccessPass>(self.inboxName(addr: addr))
     }
 
-    access(self) fun unpublishPassCapability(passUUID: UInt64) {
-        let _ = self.account.inbox.unpublish<&EarlyAccessPass>(self.inboxName(passUUID: passUUID))
+    access(self) fun deletePassCapabilities(addr: Address) {
+        let controllers = self.account.capabilities.storage.getControllers(forPath: self.passStoragePath(addr: addr))
+        for controller in controllers {
+            controller.delete()
+        }
     }
 
-    view access(self) fun passStoragePath(passUUID: UInt64): StoragePath {
-        return StoragePath(identifier: "FlowYieldVaultsEarlyAccessPass_\(passUUID)")!
+    view access(self) fun passStoragePath(addr: Address): StoragePath {
+        return StoragePath(identifier: "FlowYieldVaultsEarlyAccessPass_\(addr.toString())")!
     }
 
     init() {
         self.adminStoragePath = StoragePath(identifier: "FlowYieldVaultsEarlyAccessAdmin")!
         self.passCapabilityStoragePath = StoragePath(identifier: "FlowYieldVaultsEarlyAccessPassCapability")!
-        self.mostRecentIssuedPassUUID = {}
         self.account.storage.save(<- create Admin(), to: self.adminStoragePath)
     }
 }
