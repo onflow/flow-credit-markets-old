@@ -28,10 +28,12 @@ access(all) contract interface FlowYieldVaultsInterfaces {
         ///   to the strategy if it wants to stamp the vault with its name.
         access(all) fun createYieldVault(name: String): @{YieldVault}
 
-        /// Human-readable description of what this strategy does. Surfaced
-        /// by `FlowYieldVaults.strategyInfos()` so UIs can list strategies
+        /// Free-form metadata about this strategy as a key → value map.
+        /// Each strategy decides what to expose (e.g. `"description"`,
+        /// `"protocol"`, `"asset"`). Surfaced by
+        /// `FlowYieldVaults.strategyInfos()` so UIs can list strategies
         /// without hard-coding their metadata.
-        access(all) view fun description(): String
+        access(all) view fun info(): {String: String}
     }
 
     /// Yield-generating position minted by a strategy. The concrete resource

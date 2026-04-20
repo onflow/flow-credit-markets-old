@@ -55,9 +55,7 @@ sequenceDiagram
     FYV-->>Caller: "@{YieldVault}" + StrategyVaultCreated(name)
 ```
 
-`Caller` is either:
-- another contract on the same account (today: `FlowYieldVaultsEarlyAccess.EarlyAccessPass`), or
-- a transaction holding `&FlowYieldVaults.Admin` — `Admin.createYieldVault` is a thin wrapper around the `access(account)` entrypoint so admin flows (ops, tests) don't need to go through early access.
+`Caller` is another contract on the same account (today: `FlowYieldVaultsEarlyAccess.EarlyAccessPass`). During the early access period no other caller exists. Tests side-step this by deploying an extra contract on the same account that exposes `createYieldVault` publicly (`TestYieldVaultGateway`).
 
 ### Strategy removal
 
@@ -96,20 +94,14 @@ Admin.removeStrategy(name: String)
 
 Removes the strategy registered under `name`. Panics with `"Strategy not found"` if unknown. Emits `StrategyRemoved(name)`.
 
-```
-Admin.createYieldVault(name: String) → @{YieldVault}
-```
-
-Wraps the contract-level `createYieldVault` so that callers holding `&Admin` (ops, tests) can mint vaults. The underlying `access(account)` entrypoint is unreachable from a user transaction, so this wrapper is the only admin-side path to vault creation.
-
 ### Read-only
 
 ```
-strategyCount() → UInt64          // current number of registered strategies
-strategyNames() → [String]        // all registered names
+strategyCount() → UInt64                              // current number of registered strategies
+strategyInfos() → {String: {String: String}}         // map of name → strategy-provided metadata
 ```
 
-Both are `view` and safe to call from any script.
+Both are `view` and safe to call from any script. `strategyInfos` delegates each inner map to the strategy itself via `Strategy.info()` — `FlowYieldVaults` stores no metadata of its own.
 
 ### Access boundary
 
@@ -122,10 +114,13 @@ A strategy contract only needs to expose a struct conforming to `FlowYieldVaults
 ```cadence
 access(all) struct interface Strategy {
     access(all) fun createYieldVault(name: String): @{YieldVault}
+    access(all) view fun info(): {String: String}
 }
 ```
 
 `createYieldVault` is the strategy's factory for yield vaults. The `name` it receives is the registry name the strategy was registered under — strategies are free to ignore it, log it, or use it as part of event payloads.
+
+`info` returns a free-form key → value metadata map (e.g. `"description"`, `"protocol"`, `"asset"`). Each strategy picks what to expose; `FlowYieldVaults.strategyInfos()` surfaces these maps so UIs can list strategies without hard-coding their metadata.
 
 The concrete yield vault resource must conform to:
 
@@ -144,8 +139,8 @@ The test suite uses `MockStrategy` as a minimal stand-in. Production strategy fa
 | `Admin.registerStrategy(name, …)` with a name already in use | Panics with `"Strategy already registered: <name>"`. |
 | `Admin.removeStrategy(name)` with unknown `name` | Panics with `"Strategy not found"`. |
 | `createYieldVault(name)` with unknown `name` | Panics with `"Strategy not found"`. |
-| User transaction attempts to call `FlowYieldVaults.createYieldVault` directly | Access denied (`access(account)`). Must go through `Admin.createYieldVault` or `FlowYieldVaultsEarlyAccess.EarlyAccessPass.createYieldVault`. |
-| Admin resource is moved out of `adminStoragePath` | Admin-gated transactions can no longer borrow it; registration and admin-side vault creation are blocked. Recoverable by moving the resource back. |
+| User transaction attempts to call `FlowYieldVaults.createYieldVault` directly | Access denied (`access(account)`). Must go through `FlowYieldVaultsEarlyAccess.EarlyAccessPass.createYieldVault`. |
+| Admin resource is moved out of `adminStoragePath` | Admin-gated transactions can no longer borrow it; strategy registration and removal are blocked. Recoverable by moving the resource back. |
 
 ## Monitoring
 

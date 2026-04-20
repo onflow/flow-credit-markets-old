@@ -22,9 +22,6 @@ access(all) fun test_strategyCount_starts_at_zero() {
     Test.assertEqual(0 as UInt64, strategyCount())
 }
 
-access(all) fun test_strategyNames_starts_empty() {
-    Test.assertEqual(0, strategyNames().length)
-}
 
 access(all) fun test_registerStrategy_increments_count() {
     Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
@@ -43,7 +40,7 @@ access(all) fun test_registerStrategy_multiple_names() {
     Test.expect(registerMockStrategy(name: "b", signer: admin), Test.beSucceeded())
     Test.expect(registerMockStrategy(name: "c", signer: admin), Test.beSucceeded())
     Test.assertEqual(3 as UInt64, strategyCount())
-    let names = strategyNames()
+    let names = strategyInfos().keys
     Test.assertEqual(3, names.length)
     Test.assert(names.contains("a"))
     Test.assert(names.contains("b"))
@@ -93,7 +90,7 @@ access(all) fun test_removeStrategy_removes_entry() {
     Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
     Test.expect(registerMockStrategy(name: "b", signer: admin), Test.beSucceeded())
     Test.expect(removeStrategy(name: "a", signer: admin), Test.beSucceeded())
-    let names = strategyNames()
+    let names = strategyInfos().keys
     Test.assertEqual(1, names.length)
     Test.assert(!names.contains("a"))
     Test.assert(names.contains("b"))
@@ -127,13 +124,14 @@ access(all) fun test_strategyInfos_starts_empty() {
     Test.assertEqual(0, strategyInfos().keys.length)
 }
 
-access(all) fun test_strategyInfos_returns_descriptions() {
+access(all) fun test_strategyInfos_returns_info_maps() {
     Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
     Test.expect(registerMockStrategy(name: "b", signer: admin), Test.beSucceeded())
     let infos = strategyInfos()
     Test.assertEqual(2, infos.keys.length)
-    Test.assertEqual("mock strategy", infos["a"]!)
-    Test.assertEqual("mock strategy", infos["b"]!)
+    Test.assertEqual("mock strategy", infos["a"]!["description"]!)
+    Test.assertEqual("mock", infos["a"]!["protocol"]!)
+    Test.assertEqual("mock strategy", infos["b"]!["description"]!)
 }
 
 access(all) fun test_strategyInfos_reflects_removal() {
@@ -143,7 +141,7 @@ access(all) fun test_strategyInfos_reflects_removal() {
     let infos = strategyInfos()
     Test.assertEqual(1, infos.keys.length)
     Test.assertEqual(nil, infos["a"])
-    Test.assertEqual("mock strategy", infos["b"]!)
+    Test.assertEqual("mock strategy", infos["b"]!["description"]!)
 }
 
 access(all) fun test_register_after_remove_succeeds() {
@@ -151,7 +149,7 @@ access(all) fun test_register_after_remove_succeeds() {
     Test.expect(removeStrategy(name: "a", signer: admin), Test.beSucceeded())
     Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
     Test.assertEqual(1 as UInt64, strategyCount())
-    Test.assert(strategyNames().contains("a"))
+    Test.assert(strategyInfos().keys.contains("a"))
 }
 
 access(self) fun expectFailedWithError(_ res: Test.TransactionResult, errorMessageSubstring: String) {

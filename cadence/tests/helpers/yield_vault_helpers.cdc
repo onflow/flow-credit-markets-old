@@ -6,16 +6,10 @@ access(all) fun strategyCount(): UInt64 {
     return result.returnValue! as! UInt64
 }
 
-access(all) fun strategyNames(): [String] {
-    let result = executeScript("cadence/scripts/yield_vaults/get_strategies.cdc", [])
-    Test.expect(result, Test.beSucceeded())
-    return result.returnValue! as! [String]
-}
-
-access(all) fun strategyInfos(): {String: String} {
+access(all) fun strategyInfos(): {String: {String: String}} {
     let result = executeScript("cadence/scripts/yield_vaults/get_strategy_infos.cdc", [])
     Test.expect(result, Test.beSucceeded())
-    return result.returnValue! as! {String: String}
+    return result.returnValue! as! {String: {String: String}}
 }
 
 access(all) fun registerMockStrategy(name: String, signer: Test.TestAccount): Test.TransactionResult {

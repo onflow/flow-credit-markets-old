@@ -90,18 +90,14 @@ access(all) contract FlowYieldVaults: FlowYieldVaultsInterfaces {
         return UInt64(self.strategies.length)
     }
 
-    view access(all) fun strategyNames(): [String] {
-        return self.strategies.keys
-    }
-
-    /// Returns a map of registered strategy name → strategy description.
-    /// Each description is produced by the strategy itself via
-    /// `FlowYieldVaultsInterfaces.Strategy.description()`; this contract
-    /// stores no metadata of its own.
-    view access(all) fun strategyInfos(): {String: String} {
-        let infos: {String: String} = {}
+    /// Returns a map of registered strategy name → strategy info map.
+    /// Each info map is produced by the strategy itself via
+    /// `FlowYieldVaultsInterfaces.Strategy.info()`; this contract stores no
+    /// metadata of its own.
+    view access(all) fun strategyInfos(): {String: {String: String}} {
+        let infos: {String: {String: String}} = {}
         for name in self.strategies {
-            infos[name] = self.strategies[name]!.description()
+            infos[name] = self.strategies[name]!.info()
         }
         return infos
     }

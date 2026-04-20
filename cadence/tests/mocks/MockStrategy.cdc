@@ -8,8 +8,11 @@ access(all) contract MockStrategy {
             return <- create Vault()
         }
 
-        access(all) view fun description(): String {
-            return "mock strategy"
+        access(all) view fun info(): {String: String} {
+            return {
+                "description": "mock strategy",
+                "protocol": "mock"
+            }
         }
     }
 
