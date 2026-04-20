@@ -12,6 +12,12 @@ access(all) fun strategyNames(): [String] {
     return result.returnValue! as! [String]
 }
 
+access(all) fun strategyInfos(): {String: String} {
+    let result = executeScript("cadence/scripts/yield_vaults/get_strategy_infos.cdc", [])
+    Test.expect(result, Test.beSucceeded())
+    return result.returnValue! as! {String: String}
+}
+
 access(all) fun registerMockStrategy(name: String, signer: Test.TestAccount): Test.TransactionResult {
     return executeTransaction("cadence/tests/transactions/yield_vaults/register_mock_strategy.cdc", [name], signer)
 }

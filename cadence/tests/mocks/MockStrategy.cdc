@@ -7,6 +7,10 @@ access(all) contract MockStrategy {
         access(all) fun createYieldVault(name _: String): @{FlowYieldVaultsInterfaces.YieldVault} {
             return <- create Vault()
         }
+
+        access(all) view fun description(): String {
+            return "mock strategy"
+        }
     }
 
     access(all) resource Vault: FlowYieldVaultsInterfaces.YieldVault {

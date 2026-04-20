@@ -94,6 +94,18 @@ access(all) contract FlowYieldVaults: FlowYieldVaultsInterfaces {
         return self.strategies.keys
     }
 
+    /// Returns a map of registered strategy name → strategy description.
+    /// Each description is produced by the strategy itself via
+    /// `FlowYieldVaultsInterfaces.Strategy.description()`; this contract
+    /// stores no metadata of its own.
+    view access(all) fun strategyInfos(): {String: String} {
+        let infos: {String: String} = {}
+        for name in self.strategies {
+            infos[name] = self.strategies[name]!.description()
+        }
+        return infos
+    }
+
     init() {
         self.strategies = {}
         self.adminStoragePath = StoragePath(identifier: "FlowYieldVaultsAdmin")!

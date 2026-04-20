@@ -123,6 +123,29 @@ access(all) fun test_removeStrategy_blocks_createYieldVault() {
     )
 }
 
+access(all) fun test_strategyInfos_starts_empty() {
+    Test.assertEqual(0, strategyInfos().keys.length)
+}
+
+access(all) fun test_strategyInfos_returns_descriptions() {
+    Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
+    Test.expect(registerMockStrategy(name: "b", signer: admin), Test.beSucceeded())
+    let infos = strategyInfos()
+    Test.assertEqual(2, infos.keys.length)
+    Test.assertEqual("mock strategy", infos["a"]!)
+    Test.assertEqual("mock strategy", infos["b"]!)
+}
+
+access(all) fun test_strategyInfos_reflects_removal() {
+    Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
+    Test.expect(registerMockStrategy(name: "b", signer: admin), Test.beSucceeded())
+    Test.expect(removeStrategy(name: "a", signer: admin), Test.beSucceeded())
+    let infos = strategyInfos()
+    Test.assertEqual(1, infos.keys.length)
+    Test.assertEqual(nil, infos["a"])
+    Test.assertEqual("mock strategy", infos["b"]!)
+}
+
 access(all) fun test_register_after_remove_succeeds() {
     Test.expect(registerMockStrategy(name: "a", signer: admin), Test.beSucceeded())
     Test.expect(removeStrategy(name: "a", signer: admin), Test.beSucceeded())
