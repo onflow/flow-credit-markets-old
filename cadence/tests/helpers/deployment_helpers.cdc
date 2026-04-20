@@ -34,7 +34,6 @@ access(all) fun deployFlowYieldVaults() {
         !yieldVaultsDeployed: "FlowYieldVaults already deployed"
     }
     yieldVaultsDeployed = true
-    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaults.cdc")
     deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
 }

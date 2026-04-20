@@ -1,10 +1,6 @@
 import Test
 import "FlowYieldVaultsEarlyAccess"
 
-access(all) fun setYieldVaultsImpl(admin: Test.TestAccount, txPath: String): Test.TransactionResult {
-    return executeTransaction(txPath, [], admin)
-}
-
 access(all) fun grantEarlyAccess(admin: Test.TestAccount, user: Test.TestAccount, allowance: UInt64): UInt64 {
     let result = executeTransaction(
         "cadence/transactions/yield_vaults/early_access/grant_access.cdc",

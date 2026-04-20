@@ -1,9 +1,8 @@
-import "FlowYieldVaultsInterfaces"
 import "FungibleToken"
 
-access(all) contract MockFlowYieldVaults: FlowYieldVaultsInterfaces {
+access(all) contract FlowYieldVaults {
 
-    access(all) resource YieldVault: FlowYieldVaultsInterfaces.YieldVault {
+    access(all) resource YieldVault: FungibleToken.Provider, FungibleToken.Receiver {
         access(all) view fun isAvailableToWithdraw(amount: UFix64): Bool {
             let _ = amount
             return false
@@ -27,7 +26,7 @@ access(all) contract MockFlowYieldVaults: FlowYieldVaultsInterfaces {
         }
     }
 
-    access(account) fun createYieldVault(strategyID: UInt64): @{FlowYieldVaultsInterfaces.YieldVault} {
+    access(account) fun createYieldVault(strategyID: UInt64): @YieldVault {
         let _ = strategyID
         return <- create YieldVault()
     }

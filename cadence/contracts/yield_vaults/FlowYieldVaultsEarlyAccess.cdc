@@ -1,4 +1,4 @@
-import "FlowYieldVaultsInterfaces"
+import "FlowYieldVaults"
 
 /// Gates yield vault creation during the early access period.
 /// An `Admin` resource issues and manages `EarlyAccessPass` resources.
@@ -13,8 +13,6 @@ access(all) contract FlowYieldVaultsEarlyAccess {
     /// Emitted when a pass is used to create a yield vault.
     access(all) event PassUsed(passUUID: UInt64, remainingAllowance: UInt64)
 
-    /// Contract name on this account implementing `FlowYieldVaultsInterfaces`.
-    access(all) var flowYieldVaultsName: String
     /// Storage path where the `Admin` resource is saved.
     access(all) let adminStoragePath: StoragePath
     /// Storage path where pass capabilities are stored for claiming.
@@ -35,11 +33,10 @@ access(all) contract FlowYieldVaultsEarlyAccess {
         /// - `strategyID`: Identifies the vault strategy to create.
         ///
         /// **Returns** A new `YieldVault` to be saved in the caller's storage.
-        access(all) fun createYieldVault(strategyID: UInt64): @{FlowYieldVaultsInterfaces.YieldVault} {
+        access(all) fun createYieldVault(strategyID: UInt64): @FlowYieldVaults.YieldVault {
             pre { self.remainingAllowance > 0: "No remaining allowance" }
             self.remainingAllowance = self.remainingAllowance - 1
-            let fyv = FlowYieldVaultsEarlyAccess.getFlowYieldVaultsContract()
-            let vault <- fyv.createYieldVault(strategyID: strategyID)
+            let vault <- FlowYieldVaults.createYieldVault(strategyID: strategyID)
             emit PassUsed(passUUID: self.uuid, remainingAllowance: self.remainingAllowance)
             return <- vault
         }
@@ -97,15 +94,6 @@ access(all) contract FlowYieldVaultsEarlyAccess {
             pass.setAllowance(newAllowance)
         }
 
-        /// Sets the contract name used to resolve the yield vaults
-        /// implementation. Must be called before any vault is created.
-        ///
-        /// **Parameters**
-        /// - `flowYieldVaultsName`: Name of a contract on this account
-        ///   that conforms to `FlowYieldVaultsInterfaces`.
-        access(all) fun setFlowYieldVaults(flowYieldVaultsName: String) {
-            FlowYieldVaultsEarlyAccess.flowYieldVaultsName = flowYieldVaultsName
-        }
     }
 
     /// Returns whether a pass with the given UUID currently exists in storage.
@@ -140,11 +128,6 @@ access(all) contract FlowYieldVaultsEarlyAccess {
         return "EarlyAccessPass_\(passUUID)"
     }
 
-    view access(self) fun getFlowYieldVaultsContract(): &{FlowYieldVaultsInterfaces} {
-        return self.account.contracts.borrow<&{FlowYieldVaultsInterfaces}>(name: self.flowYieldVaultsName)
-            ?? panic("FlowYieldVaults contract '\(self.flowYieldVaultsName)' not found on this account")
-    }
-
     access(self) fun storePass(pass: @EarlyAccessPass): UInt64 {
         let uuid = pass.uuid
         self.account.storage.save(<- pass, to: FlowYieldVaultsEarlyAccess.passStoragePath(passUUID: uuid))
@@ -177,7 +160,6 @@ access(all) contract FlowYieldVaultsEarlyAccess {
     }
 
     init() {
-        self.flowYieldVaultsName = ""
         self.adminStoragePath = StoragePath(identifier: "FlowYieldVaultsEarlyAccessAdmin")!
         self.passCapabilityStoragePath = StoragePath(identifier: "FlowYieldVaultsEarlyAccessPassCapability")!
         self.mostRecentIssuedPassUUID = {}

@@ -36,24 +36,6 @@
 				"testnet": "0000000000000007"
 			}
 		},
-		"FlowYieldVaultsInterfaces": {
-			"source": "cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc",
-			"aliases": {
-				"emulator": "0000000000000007",
-				"mainnet": "0000000000000007",
-				"testing": "0000000000000007",
-				"testnet": "0000000000000007"
-			}
-		},
-		"MockContract": {
-			"source": "cadence/tests/mocks/MockContract.cdc",
-			"aliases": {
-				"emulator": "0000000000000007",
-				"mainnet": "0000000000000007",
-				"testing": "0000000000000007",
-				"testnet": "0000000000000007"
-			}
-		},
 		"MockFlowYieldVaults": {
 			"source": "cadence/tests/mocks/MockFlowYieldVaults.cdc",
 			"aliases": {

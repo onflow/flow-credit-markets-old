@@ -16,13 +16,14 @@ access(all) fun beforeEach() { Test.reset(to: snapshot) }
 
 access(all) fun setup() {
     deploy("cadence/contracts/actions/FlowActions.cdc")
-    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsInterfaces.cdc")
-    deploy("cadence/tests/mocks/MockFlowYieldVaults.cdc")
-    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
-    Test.expect(
-        setYieldVaultsImpl(admin: admin, txPath: "cadence/tests/transactions/yield_vaults/early_access/set_mock_yield_vaults_implementation.cdc"),
-        Test.beSucceeded()
+    Test.expect(Test.deployContract(
+        name: "FlowYieldVaults",
+            path: "cadence/tests/mocks/MockFlowYieldVaults.cdc",
+            arguments: []
+        ),
+        Test.beNil()
     )
+    deploy("cadence/contracts/yield_vaults/FlowYieldVaultsEarlyAccess.cdc")
     snapshot = getCurrentBlockHeight()
 }
 

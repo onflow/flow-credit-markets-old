@@ -1,5 +1,4 @@
 import "FlowYieldVaultsEarlyAccess"
-import "FlowYieldVaultsInterfaces"
 
 /// Creates a new yield vault using the signer's early access pass.
 /// Panics if no valid pass capability is found or the pass allowance is exhausted.
