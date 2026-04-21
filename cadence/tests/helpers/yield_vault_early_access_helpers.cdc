@@ -1,5 +1,4 @@
 import Test
-import "FlowYieldVaultsEarlyAccess"
 
 access(all) fun grantEarlyAccess(admin: Test.TestAccount, user: Test.TestAccount, allowance: UInt64): Test.TransactionResult {
     return executeTransaction(

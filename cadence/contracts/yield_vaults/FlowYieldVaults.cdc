@@ -1,4 +1,3 @@
-import "FungibleToken"
 import "FlowYieldVaultsInterfaces"
 
 /// Registry of yield vault strategies on this account, keyed by name.
