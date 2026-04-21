@@ -1,4 +1,5 @@
 import "FlowYieldVaults"
+import "FlowYieldVaultsInterfaces"
 
 /// Gates yield vault creation during the early access period.
 /// An `Admin` resource issues and manages `EarlyAccessPass` resources,
@@ -30,13 +31,13 @@ access(all) contract FlowYieldVaultsEarlyAccess {
         /// Panics if allowance is exhausted.
         ///
         /// **Parameters**
-        /// - `strategyID`: Identifies the vault strategy to create.
+        /// - `name`: Name of the registered strategy to create a vault for.
         ///
         /// **Returns** A new `YieldVault` to be saved in the caller's storage.
-        access(all) fun createYieldVault(strategyID: UInt64): @FlowYieldVaults.YieldVault {
+        access(all) fun createYieldVault(name: String): @{FlowYieldVaultsInterfaces.YieldVault} {
             pre { self.remainingAllowance > 0: "No remaining allowance" }
             self.remainingAllowance = self.remainingAllowance - 1
-            let vault <- FlowYieldVaults.createYieldVault(strategyID: strategyID)
+            let vault <- FlowYieldVaults.createYieldVault(name: name)
             emit PassUsed(addr: self.addr, remainingAllowance: self.remainingAllowance)
             return <- vault
         }
