@@ -68,76 +68,71 @@ make ci
 # Documentation
 
 ## Documentation Comments Format
-The documentation comments ("doc-strings" / "doc-comments": line comments starting with `///`,
-or block comments starting with `/**`) available in Cadence programs are processed by the tool,
-to produce human-readable documentations.
+Documentation comments ("doc-strings" / "doc-comments") are line comments starting with `///` or block comments starting with `/**`, attached to declarations (contracts, resources, structs, functions, fields, events).
 
 ### Markdown Support
-Standard Markdown format is supported in doc-comments, with a bit of Cadence flavour.
-This means, any Markdown syntax used within the comments would be honoured and rendered like a standard Markdown snippet.
-It gives the flexibility for the developers to write well-structured documentations.
+Standard Markdown is supported in doc-comments. Any Markdown syntax in the comment is rendered as Markdown — use bold, italics, bullet lists, inline code, etc. as needed.
 
-e.g: A set of bullet points added using Markdown bullets syntax would be rendered as bullet points in the
-generated documentation as well.
-
-Documentation Comment:
 ```
 /// This is the description of the function. You can use markdown syntax here.
 /// Can use **bold** or _italic_ texts, or even bullet-points:
 ///   - Here's the first point.
 ///   - Can also use code snippets (eg: `a + b`)
-  ```
-Output:
-
->This is the description of the function. You can use markdown syntax here.<br/>
->Can use **bold** or _italic_ texts, or even bullet-points:
->   - Here's the first point.
->   - Can also use code snippets (eg: `a + b`)
-
+```
 
 ### Function Documentation
-Function documentation may start with a description of the function.
-It also supports a special set of tags to document parameters and return types.
-Parameters can be documented using the `@param` tag, followed by the parameter name, a colon (`:`) and the parameter description.
-The return type can be documented using the `@return` tag.
+Function documentation has three parts, in order:
+
+1. **Description** — one or more sentences explaining what the function does. Call out panics or side effects here if they affect the caller.
+2. **Parameters** block (only when the function takes parameters) — the bold label `**Parameters**` on its own line, followed by a bullet list with one line per parameter in the form ``` - `name`: description ```.
+3. **Returns** block (only when the function returns a non-`Void` value) — the bold label `**Returns**` inline, followed by a prose description of the return value.
+
+Blocks are separated by blank comment lines (`///`).
 
 ```
-/// This is the description of the function. This function adds two values.
+/// Consumes one unit of allowance and creates a new yield vault.
+/// Panics if allowance is exhausted.
 ///
-/// @param a: First integer value to add
-/// @param b: Second integer value to add
-/// @return Addition of the two arguments `a` and `b`
+/// **Parameters**
+/// - `name`: Name of the registered strategy to create a vault for.
 ///
-pub fun add(a: Int, b: Int): Int {
+/// **Returns** A new `YieldVault` to be saved in the caller's storage.
+access(all) fun createYieldVault(name: String): @{FlowYieldVaultsInterfaces.YieldVault} {
+    // ...
+}
+```
+
+For short functions where the description already names the parameters and return value in prose, the Parameters / Returns blocks can be omitted:
+
+```
+/// Returns `|numer − denom| / denom`, or `0.0` when `denom = 0`.
+/// Used to compare `|1 − (numer / denom)|` without UFix64 underflow.
+view access(all) fun absDeviationFromOne(_ numer: UFix64, _ denom: UFix64): UFix64 {
+    // ...
 }
 ```
 
 ## Best Practices
-- Avoid using headings, horizontal-lines in the documentation.
-  - It could potentially conflict with the headers and lines added by the tool, when generating the documentation
-  - This may cause the generated documentation to be rendered in a disorganized manner.
-- Use inline-codes (within backticks `` `foo` ``) when referring to names/identifiers (such as function names,
-  parameter names, etc.) in the code.
+- Avoid Markdown headings (`#`, `##`, ...) and horizontal rules (`---`) inside doc-comments. Use `**bold labels**` (like `**Parameters**`, `**Returns**`) when you need section-like structure.
+- Use inline-codes (within backticks `` `foo` ``) when referring to names / identifiers (function names, parameter names, types, field names, etc.).
   ```
-  /// This is the description of the function.
-  /// This function adds `a` and `b` values.
-  ///
-  pub fun add(a: Int, b: Int): Int {
+  /// Adds `a` and `b`.
+  access(all) fun add(a: Int, b: Int): Int {
+      // ...
   }
   ```
-- When documenting function parameters and return type, avoid mixing parameter/return-type documentations
-  with the description of the function. e.g:
+- Keep the description at the top. Do not interleave description text with the Parameters or Returns blocks.
   ```
-  /// This is the description of the function.
+  /// NOT this:
   ///
-  /// @param a: First integer value to add
-  /// @param b: Second integer value to add
+  /// Description sentence 1.
   ///
-  /// This function adds two values. However, this is not the proper way to document it.
-  /// This part of the description is not in the proper place.
+  /// **Parameters**
+  /// - `a`: First value.
   ///
-  /// @return Addition of the two arguments `a` and `b`
+  /// Description sentence 2 — this belongs up with sentence 1.
   ///
-  pub fun add(a: Int, b: Int): Int {
-  }
+  /// **Returns** The sum.
   ```
+- Put Returns after Parameters; do not split them with extra description.
+- When a function panics, say so in the description ("Panics if …"), not as a separate block.
