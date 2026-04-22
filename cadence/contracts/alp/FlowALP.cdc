@@ -43,6 +43,15 @@ access(all) contract FlowALP {
     /// In the mature protocol, liquidation should be a publicly accessible operation.
     access(all) entitlement Liquidate
 
+    /// Internal-only entitlement. Gates Pool methods that must not be
+    /// invoked directly by external callers — they are intended to be
+    /// called via other contract-controlled code paths (for example, a
+    /// Position forwarding into the Pool while binding its own UUID).
+    /// An entitled capability with this access is held inside the Pool
+    /// itself and copied into Position resources at creation; it is never
+    /// exposed publicly or granted to end users.
+    access(all) entitlement Internal
+
     /* ---------- Value Types ---------- */
 
     /// Direction of a signed balance. A position's balance for a given
@@ -200,12 +209,25 @@ access(all) contract FlowALP {
         access(self) let reserves: @Reserves
         /// Positions keyed by the Position resource's UUID.
         access(self) let positions: {UInt64: PositionRecord}
+        /// Entitled self-capability copied into each Position. Must be set
+        /// by Admin after the Pool is stored. openPosition() panics until set.
+        access(self) var selfCap: Capability<auth(Internal) &Pool>?
 
         init(config: PoolConfig) {
             self.config = config
             self.tokenStates = {}
             self.reserves <- create Reserves()
             self.positions = {}
+            self.selfCap = nil
+        }
+
+        /// One-time wiring: Admin issues `auth(Internal) &Pool` against
+        /// PoolStoragePath and installs it here so new Positions can hold it.
+        access(Admin) fun setSelfCapability(cap: Capability<auth(Internal) &Pool>) {
+            pre {
+                cap.check(): "pool capability must be valid"
+            }
+            self.selfCap = cap
         }
 
         access(all) view fun getReserveBalance(tokenType: Type): UFix64 {
@@ -220,14 +242,16 @@ access(all) contract FlowALP {
         /// Position's UUID (assigned by Cadence at creation) is the key
         /// under which its PositionRecord is stored in the pool.
         access(Participant) fun openPosition(): @Position {
-            let position <- create Position()
+            let cap = self.selfCap ?? panic("pool self-capability not configured")
+            let position <- create Position(poolCap: cap)
             self.positions[position.uuid] = PositionRecord(id: position.uuid)
             return <- position
         }
 
-        /// Deposit tokens into a position.
-        /// TODO: detailed documentation
-        access(Participant) fun deposit(position: &Position, from: @{FungibleToken.Vault}) {
+        /// Internal deposit invoked by a Position. Caller passes its own
+        /// Position reference; the Pool extracts the UUID from it. The
+        /// entitled capability gates external access.
+        access(Internal) fun positionDeposit(position: &Position, from: @{FungibleToken.Vault}) {
             pre {
                 self.reserves.isSupported(tokenType: from.getType())
             }
@@ -235,10 +259,9 @@ access(all) contract FlowALP {
             destroy from // placeholder — real impl routes to the reserve vault
         }
 
-        /// Withdraw tokens from a position.
-        /// TODO: detailed documentation
-        access(all) fun withdraw(
-            position: auth(FungibleToken.Withdraw) &Position,
+        /// Internal withdraw invoked by a Position. See positionDeposit.
+        access(Internal) fun positionWithdraw(
+            position: &Position,
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
@@ -277,15 +300,37 @@ access(all) contract FlowALP {
 
     /// Position
     ///
-    /// The user-held handle for a position. Holds no fields — its identity
-    /// is its Cadence-assigned `uuid`, and that UUID is the key under which
-    /// the Pool stores the corresponding PositionRecord. Holding this
-    /// resource (or an authorized reference) is proof of ownership for withdrawals.
-    /// The resource itself stores no funds; all custody lives in the pool.
+    /// The user-held handle for a position. Its Cadence-assigned `uuid` is
+    /// the key under which the Pool stores the corresponding PositionRecord.
+    /// The resource itself stores no funds; all custody lives in the Pool.
     ///
-    /// TODO(jord): get feedback on this approach. Alternative is Position holds a
-    ///             reference to the pool and can provide withdraw etc. functions itself.
-    access(all) resource Position {}
+    /// Position holds a private, entitled capability to the Pool and exposes
+    /// operation methods (deposit, withdraw) that forward to the Pool's
+    /// Internal-gated methods, binding `self.uuid` into each call.
+    access(all) resource Position {
+        access(self) let poolCap: Capability<auth(Internal) &Pool>
+
+        init(poolCap: Capability<auth(Internal) &Pool>) {
+            self.poolCap = poolCap
+        }
+
+        access(all) fun deposit(from: @{FungibleToken.Vault}) {
+            let pool = self.poolCap.borrow() ?? panic("pool capability unavailable")
+            pool.positionDeposit(position: &self as &Position, from: <-from)
+        }
+
+        access(FungibleToken.Withdraw) fun withdraw(
+            tokenType: Type,
+            amount: UFix64
+        ): @{FungibleToken.Vault} {
+            let pool = self.poolCap.borrow() ?? panic("pool capability unavailable")
+            return <- pool.positionWithdraw(
+                position: &self as &Position,
+                tokenType: tokenType,
+                amount: amount
+            )
+        }
+    }
 
     init() {
         self.PoolStoragePath = /storage/FlowALPPool
