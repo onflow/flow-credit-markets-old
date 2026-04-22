@@ -26,7 +26,6 @@ access(all) contract FlowALP {
 
     access(all) let PoolStoragePath: StoragePath
     access(all) let PoolPublicPath: PublicPath
-    access(all) let AdminStoragePath: StoragePath
 
     /* ---------- Entitlements ---------- */
 
@@ -43,13 +42,8 @@ access(all) contract FlowALP {
     /// In the mature protocol, liquidation should be a publicly accessible operation.
     access(all) entitlement Liquidate
 
-    /// Internal-only entitlement. Gates Pool methods that must not be
-    /// invoked directly by external callers — they are intended to be
-    /// called via other contract-controlled code paths (for example, a
-    /// Position forwarding into the Pool while binding its own UUID).
-    /// An entitled capability with this access is held inside the Pool
-    /// itself and copied into Position resources at creation; it is never
-    /// exposed publicly or granted to end users.
+    /// Grants access to internal methods, for use by co-operating internal components.
+    /// This entitlement MUST NEVER be granted externally.
     access(all) entitlement Internal
 
     /* ---------- Value Types ---------- */
@@ -101,10 +95,8 @@ access(all) contract FlowALP {
     /// Positions are uniquely identified by their ID, which is the UUID of the Position resource
     /// granted when the position is opened.
     access(all) struct PositionRecord {
-        /// Mirror of the Position resource's UUID; same value the Pool uses
-        /// as dict key. Kept for self-describing logs/events (?)
-        ///
-        /// TODO: verify if this is needed
+        /// Mirror of the Position resource's UUID; same value the Pool uses as dict.
+        /// TODO: This field is copied here to enable this struct to be fully self-describing: remove if this property is not needed.
         access(all) let id: UInt64
 
         /// Set of credit and debit balances associated with this position.
@@ -136,11 +128,10 @@ access(all) contract FlowALP {
         access(contract) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
             pre {
                 emptyVault.balance == 0.0: "initial vault must be empty"
+                self.vaults[emptyVault.getType()] == nil: "token must not already be supported"
             }
             let tokenType = emptyVault.getType()
-            assert(self.vaults[tokenType] == nil, message: "token type already supported")
-            let prior <- self.vaults[tokenType] <- emptyVault
-            destroy prior
+            self.vaults[tokenType] <-! emptyVault
         }
 
         /// Deposit into the appropriate vault. Fails if token type unsupported.
@@ -248,27 +239,32 @@ access(all) contract FlowALP {
             return <- position
         }
 
-        /// Internal deposit invoked by a Position. Caller passes its own
-        /// Position reference; the Pool extracts the UUID from it. The
-        /// entitled capability gates external access.
-        access(Internal) fun positionDeposit(position: &Position, from: @{FungibleToken.Vault}) {
+        /// Internal deposit method that may only be invoked by a Position resource.
+        /// Access control is implemented by:
+        ///  1. the Position resource implementation binds its UUID to all pool operations.
+        ///  2. Internal-entitled Pool references are only distributed to internal components.
+        /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
+        /// TODO: Detailed documentation and invariants
+        access(Internal) fun internalDeposit(positionUUID: UInt64, from: @{FungibleToken.Vault}) {
             pre {
                 self.reserves.isSupported(tokenType: from.getType())
             }
-            let _pid = position.uuid
+            let _pid = positionUUID
             destroy from // placeholder — real impl routes to the reserve vault
         }
 
-        /// Internal withdraw invoked by a Position. See positionDeposit.
-        access(Internal) fun positionWithdraw(
-            position: &Position,
+        /// Internal withdraw invoked by a Position. See internalDeposit.
+        /// TODO: consider splitting withdraw collateral vs borrow debt into distinct methods.
+        /// TODO: Detailed documentation and invariants
+        access(Internal) fun internalWithdraw(
+            positionUUID: UInt64,
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
             pre {
                 self.reserves.isSupported(tokenType: tokenType)
             }
-            let _pid = position.uuid
+            let _pid = positionUUID
             let _token = tokenType
             let _amt = amount
             panic("not implemented")
@@ -308,24 +304,41 @@ access(all) contract FlowALP {
     /// operation methods (deposit, withdraw) that forward to the Pool's
     /// Internal-gated methods, binding `self.uuid` into each call.
     access(all) resource Position {
+        /// Permissioned reference to the Pool which created this Position's.
+        /// CAUTION: This reference must never be exposed outside this Position.
         access(self) let poolCap: Capability<auth(Internal) &Pool>
 
         init(poolCap: Capability<auth(Internal) &Pool>) {
+            pre {
+                poolCap.check(): "must be initialized with valid capability"
+            }
             self.poolCap = poolCap
         }
 
-        access(all) fun deposit(from: @{FungibleToken.Vault}) {
+        /// Borrows the pool reference using the Position's internal capability.
+        access(self) fun borrowPool(): auth(Internal) &Pool {
             let pool = self.poolCap.borrow() ?? panic("pool capability unavailable")
-            pool.positionDeposit(position: &self as &Position, from: <-from)
+            return pool
         }
 
+        /// Deposits funds into the position.
+        /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
+        /// TODO: Detailed documentation and invariants
+        access(all) fun deposit(from: @{FungibleToken.Vault}) {
+            let pool = self.borrowPool()
+            pool.internalDeposit(positionUUID: self.uuid, from: <-from)
+        }
+
+        /// Withdraws funds from the position.
+        /// TODO: consider splitting withdraw collateral vs borrow debt into distinct methods.
+        /// TODO: Detailed documentation and invariants
         access(FungibleToken.Withdraw) fun withdraw(
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
-            let pool = self.poolCap.borrow() ?? panic("pool capability unavailable")
-            return <- pool.positionWithdraw(
-                position: &self as &Position,
+            let pool = self.borrowPool()
+            return <- pool.internalWithdraw(
+                positionUUID: self.uuid,
                 tokenType: tokenType,
                 amount: amount
             )
@@ -335,6 +348,5 @@ access(all) contract FlowALP {
     init() {
         self.PoolStoragePath = /storage/FlowALPPool
         self.PoolPublicPath = /public/FlowALPPool
-        self.AdminStoragePath = /storage/FlowALPAdmin
     }
 }
