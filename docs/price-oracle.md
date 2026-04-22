@@ -369,6 +369,8 @@ Not prescribed. Defensible shapes:
 
 All are heuristics under real (fat-tailed, regime-switching) return distributions; threshold calibration is empirical per token. No on-chain breaker has overcome this. The *structural* guarantees below hold regardless of metric.
 
+**Scheduler irregularity.** Implementations should not assume uniform spacing between observations. Metrics that operate on observed `publishTime` deltas absorb irregularity naturally; metrics that assume a uniform grid degrade in accuracy under irregularity but not in safety — stale observations age out via N3 regardless. The choice of approach follows from the chosen metric.
+
 ### Invariants and timing bounds
 
 - **B-I Fail-closed on trip.** When a deviation check rejects an observation, breaker state is unchanged. Consumers continue to see the previously-accepted value until it ages past the staleness bound (N3). Trip signalling to off-chain monitoring is covered by I3.
@@ -393,6 +395,8 @@ t − τ  ≤  stalenessBound_breaker  +  stalenessBound_aggregator  +  δ_caden
 ```
 
 Components: the breaker's staleness gate, the aggregator's staleness gate, the worst-case wait between scheduled ticks, scheduler-slack (actual inter-tick delay may exceed the nominal cadence), and clock-skew between source-attested `publishTime` and on-chain block time (per Assumptions). Tune so the composite bound is acceptable for risk-critical reads; `σ_scheduler` and `ε_skew` depend on the deployment environment and are bounded rather than tuned.
+
+**Min-semantics through composition.** Sources publish at unsynchronized instants, so `source.publishTime` differs across N. The aggregator takes `min` over contributing sources (conservative: "at least this old"); the breaker's staleness check uses that `min` as its input. Freshness is therefore gated against the oldest contributing source at every layer — no source can age past the composite bound without triggering N3.
 
 ### What the breaker MUST NOT do
 
