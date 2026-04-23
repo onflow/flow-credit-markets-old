@@ -128,7 +128,7 @@ access(all) contract FlowALP {
         access(contract) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
             pre {
                 emptyVault.balance == 0.0: "initial vault must be empty"
-                self.vaults[emptyVault.getType()] == nil: "token must not already be supported"
+                !self.isSupported(tokenType: emptyVault.getType()): "token must not already be supported"
             }
             let tokenType = emptyVault.getType()
             self.vaults[tokenType] <-! emptyVault
@@ -157,11 +157,6 @@ access(all) contract FlowALP {
                 return vaultRef.balance
             }
             return 0.0
-        }
-
-        /// Returns the set of supported tokens. Output list has no guaranteed order.
-        access(all) view fun getSupportedTokens(): [Type] {
-            return self.vaults.keys
         }
 
         /// Returns true if the given token is supported.
