@@ -20,47 +20,48 @@ import "FungibleToken"
 ///    Record types are mutated only by their own methods: fields are access(self),
 ///    mutators are access(contract) (or narrower).
 ///
-/// DESIGN: Validator / StateMutation pipeline
-/// All state changes flow through a two-phase pipeline. Operations on the Pool are
-/// structured as:
+/// DESIGN: Orchestrator / Intent pipeline
+/// Top-level Pool API methods (e.g. `internalDeposit`, `internalWithdraw`,
+/// `liquidate`) act as orchestrators. Each orchestrator is a thin coordinator
+/// that:
 ///
-///     mutations <- validateXxx(&pool, args)     // Phase 1: validate
-///     pool.applyMutations(<- mutations)         // Phase 2: apply
-///     // ... any resource output effects ...
-///     pool.checkInvariants()                    // Phase 3: invariants
+///     1. builds an Intent struct describing the requested operation,
+///     2. calls a contract-level validator function with the intent and a
+///        read-only `&Pool`,
+///     3. calls a contract-level mutator function with the intent, any
+///        input resources, and an `auth(MutateState) &Pool`,
+///     4. returns any output resources produced by the mutator.
 ///
-/// Phase 1 — Validation (read-only w.r.t. Pool state).
-///   Validators are contract-level functions that receive an un-entitled `&Pool`
-///   as a live read-only snapshot. They enforce all operation-level business rules
-///   (supported tokens, caps, health factors, paused state, ...) and panic on any
-///   rejected operation. On success they return `@[{StateMutation}]` — a list of
-///   resource-typed mutations describing the state changes to apply.
+/// Validators are `view` functions that read Pool state and panic on any
+/// operation-level rule violation (supported tokens, caps, health factors,
+/// paused state, ...). They do not construct or return any state-change
+/// artifact — they are pure yes/no gates.
 ///
-/// Phase 2 — Application.
-///   `Pool.applyMutations` consumes the list, invoking each mutation's `apply()`
-///   with an `auth(MutateState) &Pool`. The `MutateState` entitlement gates the small set
-///   of Pool methods that actually write state; since validators are the only
-///   constructors of concrete mutation types (each has an `access(contract)` init),
-///   only validated mutations can trigger a write.
+/// Mutators apply all state changes for the operation, including any
+/// movements into or out of Reserves, and then call `Pool.checkInvariants`.
+/// They return any output resources (e.g. the vault produced by a withdraw)
+/// to the orchestrator. An invariant violation panics and reverts the tx.
 ///
-/// Phase 3 — Invariants.
-///   `Pool.checkInvariants` is called once at the end of each operation, after
-///   all mutations have been applied and any direct resource effects (e.g. the
-///   vault returned by a withdraw) have resolved. It verifies pool-level and
-///   position-level invariants; any violation panics and reverts the tx.
+/// Access-control convention.
+/// The `MutateState` entitlement gates the small set of Pool methods that
+/// write state (the "appliers") and the invariant check. An
+/// `auth(MutateState) &Pool` is produced only inside Pool's orchestrator
+/// methods — it is never stored and never escapes the operation.
+///
+/// Every method on Pool is either:
+///   - `view` (reads only; compiler-enforced non-mutation), OR
+///   - entitlement-gated (`access(Admin)`, `access(Internal)`,
+///     `access(MutateState)`, `access(Admin | Liquidate)`, ...).
+///
+/// No method on Pool is `access(all)` non-view or `access(contract)` non-view.
+/// This is a lint-checkable convention: see Makefile target `lint-pool-access`.
 ///
 /// Resource I/O.
-///   Resources flowing *into* the Pool are modeled as mutations (e.g. `VaultDeposit`
-///   carries the incoming vault and deposits it into Reserves on apply). Resources
-///   flowing *out* of the Pool (e.g. the vault produced by a withdraw) are NOT
-///   modeled as mutations — they are direct effects performed by the operation
-///   body between `applyMutations` and `checkInvariants`. The invariant check
-///   (Σ ledger = reserves, per supported token) is what binds the two consistent.
-///
-/// Composability.
-///   Mutations are composable deltas, not idempotent absolute writes. A single
-///   operation may produce multiple deltas for the same (positionID, tokenType),
-///   and multi-leg operations (e.g. liquidation) may emit heterogeneous lists.
+/// Intents are plain structs and carry no resources. Input resources (e.g. the
+/// incoming vault for a deposit) are passed as separate arguments to the
+/// mutator alongside the intent; the mutator asserts on entry that the
+/// resource matches the intent's declared type and amount. Output resources
+/// are returned directly by the mutator.
 ///
 access(all) contract FlowALP {
 
@@ -88,10 +89,10 @@ access(all) contract FlowALP {
     /// This entitlement MUST NEVER be granted externally.
     access(all) entitlement Internal
 
-    /// Gates the low-level state-writing methods on Pool.
-    /// An `auth(MutateState) &Pool` is produced only inside `Pool.applyMutations`,
-    /// which passes it to each `StateMutation.apply`. No capability with this
-    /// entitlement is ever stored or shared; it MUST NEVER escape the pipeline.
+    /// Gates the low-level state-writing methods on Pool (the "appliers") and
+    /// the invariant check. An `auth(MutateState) &Pool` is produced only
+    /// inside a Pool orchestrator method and passed to a contract-level
+    /// mutator function. It is never stored and MUST NEVER escape an operation.
     access(all) entitlement MutateState
 
     /* ---------- Value Types ---------- */
@@ -117,59 +118,41 @@ access(all) contract FlowALP {
         }
     }
 
-    /* ---------- State Mutations ---------- */
+    /* ---------- Intents ---------- */
 
-    /// StateMutation
-    ///
-    /// A validated, applicable change to Pool state. Concrete mutations are
-    /// resources whose `init` is `access(contract)`, so only validator
-    /// functions in this contract can construct them. They are consumed
-    /// exactly once by `Pool.applyMutations`, which invokes `apply` with
-    /// an `auth(MutateState) &Pool` — the only handle permitted to write state.
-    access(all) resource interface StateMutation {
-        access(MutateState) fun apply(pool: auth(MutateState) &Pool)
-    }
+    /// Intents are plain structs describing a requested operation. They carry
+    /// no resources; any input resources are passed as separate arguments to
+    /// the mutator alongside the intent. An intent is built by the orchestrator,
+    /// inspected by the validator, and consumed by the mutator — all within a
+    /// single operation and never exposed outside the contract.
 
-    /// LedgerDelta
+    /// DepositIntent
     ///
-    /// Additive change to a position's balance for a single token. Composable:
-    /// multiple deltas for the same (positionID, tokenType) within one
-    /// `applyMutations` call are summed in order.
-    access(all) resource LedgerDelta: StateMutation {
+    /// Describes a deposit of `amount` of `tokenType` into position `positionID`.
+    access(all) struct DepositIntent {
         access(all) let positionID: UInt64
         access(all) let tokenType: Type
-        access(all) let delta: SignedAmount
+        access(all) let amount: UFix64
 
-        access(contract) init(positionID: UInt64, tokenType: Type, delta: SignedAmount) {
+        view init(positionID: UInt64, tokenType: Type, amount: UFix64) {
             self.positionID = positionID
             self.tokenType = tokenType
-            self.delta = delta
-        }
-
-        access(MutateState) fun apply(pool: auth(MutateState) &Pool) {
-            pool.applyLedgerDelta(
-                positionID: self.positionID,
-                tokenType: self.tokenType,
-                delta: self.delta,
-            )
+            self.amount = amount
         }
     }
 
-    /// VaultDeposit
+    /// WithdrawIntent
     ///
-    /// Moves an incoming vault into Reserves. The vault is carried inside the
-    /// mutation until apply, at which point it is consumed by the Pool's
-    /// MutateState-gated applier.
-    access(all) resource VaultDeposit: StateMutation {
-        access(self) var vault: @{FungibleToken.Vault}?
+    /// Describes a withdrawal of `amount` of `tokenType` from position `positionID`.
+    access(all) struct WithdrawIntent {
+        access(all) let positionID: UInt64
+        access(all) let tokenType: Type
+        access(all) let amount: UFix64
 
-        access(contract) init(vault: @{FungibleToken.Vault}) {
-            self.vault <- vault
-        }
-
-        access(MutateState) fun apply(pool: auth(MutateState) &Pool) {
-            let v <- self.vault <- nil
-            pool.applyVaultDeposit(from: <- v!)
+        view init(positionID: UInt64, tokenType: Type, amount: UFix64) {
+            self.positionID = positionID
+            self.tokenType = tokenType
+            self.amount = amount
         }
     }
 
@@ -304,72 +287,81 @@ access(all) contract FlowALP {
 
     /* ---------- Validators ---------- */
 
-    /// Validators are the sole constructors of StateMutation resources.
-    /// Each validator:
-    ///   - receives an un-entitled `&Pool` as a read-only snapshot of live state,
-    ///   - enforces all operation-level business rules (panicking on violation),
-    ///   - returns `@[{StateMutation}]` describing the state changes to apply.
-    ///
-    /// Validators never mutate Pool state directly; all writes happen in
-    /// `Pool.applyMutations`. This separation keeps business rules co-located
-    /// and independently testable, and gives auditors a single choke point —
-    /// `Pool.applyMutations` — through which all writes flow.
+    /// Validators are `view` functions that inspect a read-only `&Pool` and
+    /// panic if the intent violates any operation-level rule. They never
+    /// mutate state (enforced by the compiler) and return nothing on success.
 
     /// validateDeposit
-    ///
-    /// Validates a deposit of `vault` into the position identified by `positionID`.
-    /// On success returns a VaultDeposit (to move the vault into Reserves) and
-    /// a LedgerDelta crediting the position by the vault's amount.
-    access(contract) fun validateDeposit(
-        pool: &Pool,
-        positionID: UInt64,
-        vault: @{FungibleToken.Vault},
-    ): @[{StateMutation}] {
+    access(contract) view fun validateDeposit(pool: &Pool, intent: DepositIntent) {
         // TODO: enforce
         //   - pool not paused
-        //   - vault.getType() is supported
-        //   - positionID refers to an existing position
+        //   - intent.tokenType is supported
+        //   - intent.positionID refers to an existing position
+        //   - intent.amount > 0
         //   - per-token deposit cap not exceeded
         let _p = pool
-        let tokenType = vault.getType()
-        let amount = vault.balance
-
-        let mutations: @[{StateMutation}] <- []
-        mutations.append(<- create VaultDeposit(vault: <- vault))
-        mutations.append(<- create LedgerDelta(
-            positionID: positionID,
-            tokenType: tokenType,
-            delta: SignedAmount(direction: BalanceDirection.Credit, quantity: amount),
-        ))
-        return <- mutations
+        let _i = intent
     }
 
     /// validateWithdraw
-    ///
-    /// Validates a withdrawal of `amount` of `tokenType` from the position
-    /// identified by `positionID`. On success returns a LedgerDelta debiting
-    /// the position. The vault output itself is produced as a direct effect of
-    /// the operation (see Pool.internalWithdraw), not as a mutation.
-    access(contract) fun validateWithdraw(
-        pool: &Pool,
-        positionID: UInt64,
-        tokenType: Type,
-        amount: UFix64,
-    ): @[{StateMutation}] {
+    access(contract) view fun validateWithdraw(pool: &Pool, intent: WithdrawIntent) {
         // TODO: enforce
         //   - pool not paused
-        //   - tokenType is supported
-        //   - position exists
-        //   - post-op health factor ≥ 1 (using pool snapshot)
+        //   - intent.tokenType is supported
+        //   - intent.positionID refers to an existing position
+        //   - intent.amount > 0
+        //   - post-op health factor ≥ 1
         //   - per-token withdraw / borrow caps not exceeded
         let _p = pool
-        let mutations: @[{StateMutation}] <- []
-        mutations.append(<- create LedgerDelta(
-            positionID: positionID,
-            tokenType: tokenType,
-            delta: SignedAmount(direction: BalanceDirection.Debit, quantity: amount),
-        ))
-        return <- mutations
+        let _i = intent
+    }
+
+    /* ---------- Mutators ---------- */
+
+    /// Mutators apply all state changes for an operation, then call
+    /// `Pool.checkInvariants`. They require `auth(MutateState) &Pool` —
+    /// obtained only inside a Pool orchestrator method and never stored.
+    /// Input resources are passed alongside the intent; the mutator asserts
+    /// on entry that the resource matches the intent's declared fields.
+    /// Output resources are returned directly.
+
+    /// applyDeposit
+    ///
+    /// Moves the incoming vault into Reserves and credits the position.
+    access(contract) fun applyDeposit(
+        pool: auth(MutateState) &Pool,
+        intent: DepositIntent,
+        vault: @{FungibleToken.Vault},
+    ) {
+        pre {
+            vault.getType() == intent.tokenType: "vault type does not match intent"
+            vault.balance == intent.amount: "vault amount does not match intent"
+        }
+        pool.applyVaultDeposit(from: <- vault)
+        pool.applyLedgerDelta(
+            positionID: intent.positionID,
+            tokenType: intent.tokenType,
+            delta: SignedAmount(direction: BalanceDirection.Credit, quantity: intent.amount),
+        )
+        pool.checkInvariants()
+    }
+
+    /// applyWithdraw
+    ///
+    /// Debits the position and withdraws a vault from Reserves. The vault is
+    /// returned to the orchestrator as a direct effect.
+    access(contract) fun applyWithdraw(
+        pool: auth(MutateState) &Pool,
+        intent: WithdrawIntent,
+    ): @{FungibleToken.Vault} {
+        pool.applyLedgerDelta(
+            positionID: intent.positionID,
+            tokenType: intent.tokenType,
+            delta: SignedAmount(direction: BalanceDirection.Debit, quantity: intent.amount),
+        )
+        let vault <- pool.applyReserveWithdraw(tokenType: intent.tokenType, amount: intent.amount)
+        pool.checkInvariants()
+        return <- vault
     }
 
     /// Pool
@@ -423,46 +415,51 @@ access(all) contract FlowALP {
         /// Access control is implemented by:
         ///  1. the Position resource implementation binds its UUID to all pool operations.
         ///  2. Internal-entitled Pool references are only distributed to internal components.
-        /// Follows the validator / mutation pipeline: validate → apply → check invariants.
+        /// Orchestrator: builds a DepositIntent, validates, then applies.
         /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
         access(Internal) fun internalDeposit(positionUUID: UInt64, from: @{FungibleToken.Vault}) {
-            let mutations <- FlowALP.validateDeposit(
-                pool: &self as &Pool,
+            let intent = DepositIntent(
                 positionID: positionUUID,
+                tokenType: from.getType(),
+                amount: from.balance,
+            )
+            FlowALP.validateDeposit(pool: &self as &Pool, intent: intent)
+            FlowALP.applyDeposit(
+                pool: &self as auth(MutateState) &Pool,
+                intent: intent,
                 vault: <- from,
             )
-            self.applyMutations(mutations: <- mutations)
-            self.checkInvariants()
         }
 
         /// Internal withdraw invoked by a Position. See internalDeposit.
-        /// Follows the validator / mutation pipeline. The produced vault is a
-        /// direct effect (not a mutation) — it is taken out of Reserves after
-        /// the ledger debit has been applied and before invariants are checked.
+        ///
+        /// Orchestrator: builds a WithdrawIntent, validates, then applies.
+        /// The mutator returns the withdrawn vault; the orchestrator forwards
+        /// it to the caller unchanged.
         /// TODO: consider splitting withdraw collateral vs borrow debt into distinct methods.
         access(Internal) fun internalWithdraw(
             positionUUID: UInt64,
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
-            let mutations <- FlowALP.validateWithdraw(
-                pool: &self as &Pool,
+            let intent = WithdrawIntent(
                 positionID: positionUUID,
                 tokenType: tokenType,
                 amount: amount,
             )
-            self.applyMutations(mutations: <- mutations)
-            let vault <- self.reserves.withdraw(tokenType: tokenType, amount: amount)
-            self.checkInvariants()
-            return <- vault
+            FlowALP.validateWithdraw(pool: &self as &Pool, intent: intent)
+            return <- FlowALP.applyWithdraw(
+                pool: &self as auth(MutateState) &Pool,
+                intent: intent,
+            )
         }
 
         /// Manually liquidate an unhealthy position.
-        /// TODO: implement via the validator / mutation pipeline. The validator
-        /// (validateLiquidate — not yet written) emits a heterogeneous list of
-        /// LedgerDeltas covering both the borrower and liquidator sides, plus a
-        /// VaultDeposit for the repayment. The seized vault is a direct effect,
-        /// produced between applyMutations and checkInvariants.
+        /// TODO: implement via the orchestrator pattern. Introduce a
+        /// LiquidationIntent covering both borrower and liquidator sides; a
+        /// `view` validateLiquidate enforces health-factor + close-factor rules;
+        /// applyLiquidate consumes the repay vault, applies ledger changes,
+        /// withdraws the seized vault, checks invariants, and returns it.
         access(Admin | Liquidate) fun liquidate(
             positionUUID: UInt64,
             repay: @{FungibleToken.Vault},
@@ -474,30 +471,15 @@ access(all) contract FlowALP {
             panic("not implemented")
         }
 
-        /* ----- Validator / mutation pipeline internals ----- */
+        /* ----- Appliers (MutateState-gated) -----
+         *
+         * The full set of methods on Pool that write state. Only mutator
+         * functions (invoked from an orchestrator with auth(MutateState) &Pool)
+         * may call these. Every writer lives here; to enumerate the write
+         * surface, grep `access(MutateState)` on Pool.
+         */
 
-        /// applyMutations is the single choke point through which every
-        /// state write flows. It consumes the list produced by a validator,
-        /// calling each mutation's `apply` with an `auth(MutateState) &Pool`. The
-        /// `MutateState` entitlement is obtained here and nowhere else, so the
-        /// low-level appliers below can only be reached via a validated
-        /// mutation.
-        ///
-        /// Invariants are not checked here — the caller is expected to invoke
-        /// `checkInvariants` after all mutations and any direct effects (e.g.
-        /// vault outputs) have settled.
-        access(contract) fun applyMutations(mutations: @[{StateMutation}]) {
-            let selfRef = &self as auth(MutateState) &Pool
-            while mutations.length > 0 {
-                let m <- mutations.removeFirst()
-                m.apply(pool: selfRef)
-                destroy m
-            }
-            destroy mutations
-        }
-
-        /// Adds `delta` to the balance of `tokenType` for the position
-        /// identified by `positionID`. Callable only from LedgerDelta.apply.
+        /// Composes `delta` into the balance of `tokenType` for the given position.
         access(MutateState) fun applyLedgerDelta(
             positionID: UInt64,
             tokenType: Type,
@@ -509,14 +491,23 @@ access(all) contract FlowALP {
             self.positions[positionID] = record
         }
 
-        /// Moves `from` into Reserves. Callable only from VaultDeposit.apply.
+        /// Moves `from` into Reserves.
         access(MutateState) fun applyVaultDeposit(from: @{FungibleToken.Vault}) {
             self.reserves.deposit(from: <- from)
         }
 
-        /// checkInvariants is invoked at the end of every operation, after
-        /// all mutations and direct effects have settled. Any violation
-        /// panics and reverts the transaction.
+        /// Withdraws a vault from Reserves.
+        access(MutateState) fun applyReserveWithdraw(
+            tokenType: Type,
+            amount: UFix64,
+        ): @{FungibleToken.Vault} {
+            return <- self.reserves.withdraw(tokenType: tokenType, amount: amount)
+        }
+
+        /// Invoked at the end of every mutator, after all state changes for
+        /// the operation have settled. Panics on any violation, reverting
+        /// the transaction. Marked `view` so the compiler enforces that the
+        /// check itself cannot mutate.
         ///
         /// TODO: implement
         ///   - for each supported token T:
@@ -524,7 +515,7 @@ access(all) contract FlowALP {
         ///   - for each position P:
         ///       healthFactor(P) ≥ 1  (unless P is flagged for liquidation)
         ///   - pool-level caps respected
-        access(self) fun checkInvariants() {}
+        access(MutateState) view fun checkInvariants() {}
     }
 
     /* ---------- Position Resource ---------- */
