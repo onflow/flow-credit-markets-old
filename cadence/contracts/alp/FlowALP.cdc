@@ -220,10 +220,6 @@ access(all) contract FlowALP {
             return self.reserves.getBalance(tokenType: tokenType)
         }
 
-        access(all) view fun getSupportedTokens(): [Type] {
-            return self.reserves.getSupportedTokens()
-        }
-
         /// Mint a new position and return the owner's handle resource. The
         /// Position's UUID (assigned by Cadence at creation) is the key
         /// under which its PositionRecord is stored in the pool.
@@ -281,10 +277,6 @@ access(all) contract FlowALP {
             destroy repay
             panic("not implemented")
         }
-
-        access(Admin) fun pause() {}
-
-        access(Admin) fun unpause() {}
     }
 
     /* ---------- Position Resource ---------- */
