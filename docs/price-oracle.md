@@ -116,13 +116,6 @@ Consumers of `price(ofToken: T)`:
 
 The mature protocol requires ≥ 2 **independent** sources, with at least one source that is not derived from on-chain liquidity (e.g., Pyth or BandOracle, the two signed off-chain feeds currently available on Flow). A single source — or multiple sources all sharing a failure mode (e.g., all DEX-spot) — can be stale, frozen, or manipulated with no meaningful cross-check; this limitation cannot be fixed by tuning parameters.
 
-If the initial deployment ships a single-source oracle under the shortcut in Initial Deployment vs. Mature, the implementation MUST carry:
-1. Prominent header warning in the source file stating that the implementation is INCOMPATIBLE with the mature protocol.
-2. Observable `sourceCount` field or `view fun sourceCount(): Int`.
-3. An observable init-time marker (event or on-chain state) advertising the single-source deployment so off-chain monitoring can detect it.
-
-These controls make the unsafe configuration *loud*; they do not make it safe.
-
 *Aggregation ≠ dynamic oracle selection.* Multi-source aggregation requires ALL configured sources to produce fresh, agreeing data; any failure ⇒ nil. Dynamic oracle selection (picking among sources based on freshness / deviation) is a disguised fallback chain and explicitly out of scope — distinct from aggregation.
 
 ### I2 — No stale-as-fresh.
@@ -228,11 +221,10 @@ access(all) struct AggregatorOracle: PriceOracle {
 
 Open question (Open Questions). Candidates:
 
-- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds available on Flow today), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is load-bearing — it IS the outlier defense. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N), but forced on us at launch by Flow's limited source ecosystem.
+- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds adopted at launch), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is load-bearing — it IS the outlier defense. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N); appropriate for launch given our source count.
 - **Median** — Byzantine-robust to `(N−1)/2` compromised feeds; meaningful only at N≥3. Used by MakerDAO Medianizer, Chainlink OCR (Data Feeds), and Band Protocol. Becomes the right default once we can onboard additional independent sources (DEX-derived, additional bridges) — research item for mature launch.
 - **Weighted median** — per-source weights, typically inverse of stated confidence. Used by Pyth Network across its publishers. Not viable at FCM launch because only Pyth publishes confidence on Flow; BandOracle and DEX sources don't. Possible later if we standardize confidence across adopted sources.
 
-At expected source counts (likely 2–3), the choice matters less than the N5 threshold. Decide once source shortlist is concrete.
 
 ## Extension: Volatility Circuit Breaker
 
@@ -273,7 +265,7 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
     // Immutable identity + config (set at init).
     access(self) let _token: Type
     access(self) let _unitOfAccount: Type
-    access(self) let _upstream: Capability<&{PriceOracle}>   // the oracle being wrapped
+    access(self) let _upstream: {PriceOracle}                // the oracle being wrapped (embedded struct)
     // plus config for staleness bound (N3), deviation threshold (trip), history window, etc.
 
     access(self) let _history: [PriceReading]                // accepted observations; consumers read via current()
@@ -298,8 +290,8 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
     // Signature matches FlowTransactionScheduler.TransactionHandler exactly.
     access(FlowTransactionScheduler.Execute)
     fun executeTransaction(id: UInt64, data: AnyStruct?) {
-        // 1. Pull (pₖ, τₖ) from self._upstream.
-        //    If borrow fails or reading is nil → no-op this tick.
+        // 1. Pull (pₖ, τₖ) from self._upstream.price(ofToken: self._token).
+        //    If reading is nil → no-op this tick.
         // 2. If self._prevObservation is nil (warm-up) → set it, skip σ̂²/trip eval.
         // 3. Compute uₖ = log(pₖ / prev.value) / √(τₖ − prev.publishTime).
         // 4. Evaluate trip: |uₖ| > k · sqrt(self._sigmaSquared) ?
@@ -348,10 +340,6 @@ access(all) struct CircuitBreakerOracle: PriceOracle {
 }
 ```
 
-Note on `unitOfAccount()` and the token check: both read snapshot fields (`_unitOfAccount`, `_token`) captured at struct init. The struct's `init` is the only place that panics — it asserts the capability resolves at construction time. Post-init, the query path cannot panic on a destroyed or broken resource: `price()` borrows gracefully and returns nil, `unitOfAccount()` doesn't borrow at all. This matches invariant I (UoA and token are immutable over the struct's lifetime) — snapshotting is correct by construction.
-
-The `CircuitBreaker` resource serves two purposes at once: it's the stateful time-series analyzer (for the deviation check), and it's the caching layer that makes consumer queries O(1) (query reads `history.last` instead of re-aggregating sources). That dual role is why the breaker makes a stateless aggregator practical at scale.
-
 ### Storage and lifecycle
 
 `CircuitBreaker` lives at a deterministic path on a protocol-controlled account (oracle contract account or dedicated operator account). One per wrapped token.
@@ -366,8 +354,6 @@ The `CircuitBreaker` resource serves two purposes at once: it's the stateful tim
 The breaker depends on `FlowTransactionScheduler` calling `executeTransaction` on a documented cadence. Without a running schedule, the most recent accepted observation ages past the staleness bound (N3) and consumers fail-closed.
 
 **Panic behavior in `executeTransaction`.** An upstream-source panic reverts the scheduled tx — history is unchanged (safe) but the tick is lost. Implementations MUST minimize their *own* panic surface here so tick loss only reflects real upstream failure, not self-inflicted bugs. Detection and recovery strategies (inferring a missed tick, rescheduling, health events) are implementation choices and not prescribed.
-
-**Precedent for scheduled-cadence update mechanisms:** MakerDAO OSM's `poke()` (keeper-driven, 1-hour delay), Chainlink Data Feeds (OCR heartbeat + deviation), Pyth Network (caller-pays pull model). Different incentive models, same "external cadence drives state" pattern. Flow's native scheduler is equivalent but protocol-funded (no keeper-network unreliability or caller-pays-to-update complication).
 
 ### Metric shape
 
@@ -411,10 +397,6 @@ Parameters (calibration open per asset, see Open Questions):
 Chosen because: handles irregular observation spacing natively (via Δt-normalization); O(1) state and O(1) compute per tick; volatility-adaptive (trip threshold scales with recent volatility rather than a fixed deviation bound); under the `Δ_max` source-spread bound (Source-time spread, above), bias is upward and bounded — breaker fails *safe* (less sensitive, not more).
 
 Alternative metrics remain open.
-
-All volatility heuristics share residual risk under real (fat-tailed, regime-switching) return distributions; threshold calibration is empirical per token. The *structural* guarantees below hold regardless of metric.
-
-**Scheduler irregularity.** Safety is preserved regardless of scheduler timing — stale observations age out via N3. The recommended default metric (below) is variable-grid and absorbs irregularity directly via Δt-normalization; alternative metrics must handle irregular spacing explicitly or accept inflated σ̂ as a false-negative risk.
 
 **Source-time spread.** Let tick `k` produce aggregate reading `(p⁽ᵏ⁾, τ⁽ᵏ⁾)` from N source observations `{(vᵢ⁽ᵏ⁾, tᵢ⁽ᵏ⁾)}` where:
 
@@ -463,31 +445,17 @@ t − τ  ≤  stalenessBound_breaker  +  stalenessBound_aggregator  +  δ_caden
 
 Components: the breaker's staleness gate, the aggregator's staleness gate, the worst-case wait between scheduled ticks, scheduler-slack (actual inter-tick delay may exceed the nominal cadence), and clock-skew between source-attested `publishTime` and on-chain block time (per Assumptions). Tune so the composite bound is acceptable for risk-critical reads; `σ_scheduler` and `ε_skew` depend on the deployment environment and are bounded rather than tuned.
 
-**Min-semantics through composition.** Sources publish at unsynchronized instants, so `source.publishTime` differs across N. The aggregator takes `min` over contributing sources (conservative: "at least this old"); the breaker's staleness check uses that `min` as its input. Freshness is therefore gated against the oldest contributing source at every layer — no source can age past the composite bound without triggering N3.
-
-### What the breaker MUST NOT do
-
-- Return a non-nil value the inner aggregator did not return (breaker is a nil-adding filter, never a substitution).
-- Return a stale price in lieu of a live one past the staleness bound.
-- Fall back to a different aggregator on trip.
-
 ## Initial Deployment vs. Mature Protocol
 
 This spec describes the mature protocol. The initial deployment may diverge as temporary shortcuts — each is well-encapsulated so mature-protocol progression is an implementation change, not a spec change.
 
-- **Single-source oracle (possibly).** If approved under the beta constraints (invite-only, FYV-only, <$1M exposure), the initial deployment may ship with one source carrying the I1 compensating controls. Mature MUST NOT.
+- **Single-source oracle (possibly).** If approved under the beta constraints (invite-only, FYV-only, <$1M exposure), the initial deployment may ship with one source. Mature MUST NOT.
 - **No volatility circuit breaker.** Optional initially; mature MUST. Progression: wrap the aggregator with `CircuitBreakerOracle`; no interface change.
-
-### What to research before mature launch
-
-- Catalog of acceptable source pairings — which count as "independent" under I1, under what market assumptions.
-- Staleness bound and scheduled-tx cadence calibration per source type.
-- Breaker metric and parameter defaults per supported token.
-- Concrete spread metric for N5.
 
 ## Open Questions
 
-- **Single-source for initial deployment?** Protocol lead to decide. The spec accommodates either path; single-source path carries I1 compensating controls.
+- **Single-source for initial deployment?** Protocol lead to decide. The spec accommodates either path.
+- **Catalog of acceptable source pairings** — which count as "independent" under I1, under what market assumptions. Research before mature launch.
 - **Aggregation function (median vs. mean).** Matters less at low N, more at higher N. Decide once source shortlist is concrete.
 - **Staleness bound.** Implementation-defined per source type; must satisfy T-I for the breaker's cadence.
 - **Spread metric and threshold for N5.** To be calibrated against source-disagreement noise.
@@ -500,8 +468,6 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 
 - **Fallback chains / dynamic oracle selection.** Distinct from aggregation; disguised single-source. Out of scope.
 - **On-chain calibration of breaker parameters.** Parameters are fixed at deployment.
-- **Drop-in conformance to `DeFiActions.PriceOracle`.** The interface is intentionally shape-aligned with `DeFiActions.PriceOracle` — same `unitOfAccount(): Type` + `price(ofToken: Type)` core — but returns `PriceReading?` instead of `UFix64?` for atomicity (I7). Callers SHOULD treat the two as semantically compatible for adapter purposes; formal conformance is not a goal.
-- **Interest-rate, yield, or non-price feeds.** Out of scope.
 
 ## Known Limitations
 
