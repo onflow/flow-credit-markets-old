@@ -44,37 +44,61 @@ sequenceDiagram
 
 ### HealthTrigger
 
-A `HealthTrigger` contains:
+A `HealthTrigger` is a struct containing:
 
-1. Optional upper ($$H_{\textbf{max}}$$) and/or lower ($$H_{\textbf{min}}$$) health bounds (`UFix64?`), both inclusive. At least one bound must be specified. A trigger is within bounds if $$H_{\textbf{min}} \leq H(P) \leq H_{\textbf{max}}$$, where an omitted bound is treated as satisfied.
+1. Optional lower ($$H_{\textbf{min}}$$) and/or upper ($$H_{\textbf{max}}$$) health bounds (`UFix64?`). At least one must be specified. A trigger is within bounds when $$H_{\textbf{min}} \leq H(P) \leq H_{\textbf{max}}$$; an omitted bound is treated as satisfied.
 2. A callback capability (`Capability<auth(FlowTransactionScheduler.Execute) &{FlowTransactionScheduler.TransactionHandler}>`) to be scheduled exactly once after the position's health goes out of bounds. The callback is parameterless — the HTM passes `data: nil` when scheduling, and the caller's `executeTransaction` implementation is responsible for querying the current position state itself.
-3. A provider capability (`Capability<auth(FungibleToken.Withdraw) &FlowToken.Vault>`) used to pay for scheduling the callback.
-4. The execution effort (`UInt64`) for the callback TX. Must be within `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().maximumIndividualEffort]`.
-5. The scheduling priority (`FlowTransactionScheduler.Priority`) for the callback TX.
+3. The execution effort (`UInt64`) for the callback TX. Must be within `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().maximumIndividualEffort]`.
+4. The scheduling priority (`FlowTransactionScheduler.Priority`) for the callback TX.
 
-All fields are plain data or opaque capability handles. No user code is called when reading or validating a `HealthTrigger` — the only user code that runs is `executeTransaction`, which executes in its own isolated scheduled TX.
+All fields are plain data or opaque capability handles. No user code is called when reading or validating a `HealthTrigger`.
 
 A single position can have multiple triggers with different bounds and callbacks (e.g. one for rebalancing, one for liquidation).
 
 ### Registry
 
+All mutable state — trigger map, configuration, and capabilities — lives inside a single `Registry` resource (resource-singleton pattern, same as `FlowTransactionScheduler`). The contract defines two entitlements on the `Registry`: `Admin` (configuration and capability management) and `Register` (trigger registration). Public read access is provided through contract-level functions that borrow the `Registry` internally.
+
 The registry is keyed by position ID ($$P$$ = `position.id`, i.e. the Position resource's UUID). Each entry contains a list of `HealthTrigger` objects for that position.
 
-Position health is obtained via `FlowALP.Pool.getPositionHealth(positionID)`, which returns `UFix64?`. A `nil` return means the health could not be determined (see [Process](#process) for how this case is handled). The **HTM** holds a single `Capability<&FlowALP.Pool>` as a contract-level dependency, set at init and changeable by admin. This ensures [Process](#process) calls the health function only once per position, regardless of how many triggers are registered for it.
+Position health is obtained via `FlowALP.Pool.getPositionHealth(positionID)`, which returns `UFix64?`. A `nil` return means the health could not be determined (see [Process](#process) for how this case is handled). The `Registry` holds a single `Capability<&FlowALP.Pool>`, set at init and changeable by admin. This ensures [Process](#process) calls the health function only once per position, regardless of how many triggers are registered for it.
 
 The **HTM** also depends on `FlowALP.Pool.positionExists(positionID)` to disambiguate a `nil` health return (position gone vs. temporary issue such as an oracle being unavailable).
 
-### Registration
+### Initialization
 
-To register a health trigger the caller provides a position ID and the five fields of a `HealthTrigger`:
+The contract `init` takes one argument:
 
 ```cadence
-access(all) fun register(
+init(poolCap: Capability<&FlowALP.Pool>)
+```
+
+FlowALP must be deployed before the **HTM** so that the Pool capability can be provided.
+
+At init the contract:
+
+1. Creates the `Registry` resource with the following defaults:
+   - `heartbeatInterval`: `600.0` (`UFix64`, 10 minutes). Changeable by admin; must remain within 1s–86 400s.
+   - `keepHeartbeatRunning`: `true`.
+   - `minHeartbeatExecutionEffort`: `50` (`UInt64`).
+   - `poolCap`: the capability passed to init.
+   - `operationalVaultCap`: a capability to the **HTM** account's own FlowToken vault, issued during init.
+   - Trigger map: empty.
+2. Creates the `HeartbeatHandler` and `ProcessHandler` resources, stores them, and issues the capabilities needed by the scheduler (see [Transaction Handlers](#transaction-handlers)).
+3. Stores the `Registry` and issues `Admin` and `Register` capabilities.
+
+Init does **not** start the Heartbeat chain. The admin must call `startHeartbeat()` after deployment (see [Scheduling](#scheduling)).
+
+### Registration
+
+To register a health trigger the caller provides a position ID and the fields of a `HealthTrigger`:
+
+```cadence
+access(Register) fun register(
     positionID: UInt64,
     hMin: UFix64?,
     hMax: UFix64?,
     callback: Capability<auth(FlowTransactionScheduler.Execute) &{FlowTransactionScheduler.TransactionHandler}>,
-    provider: Capability<auth(FungibleToken.Withdraw) &FlowToken.Vault>,
     executionEffort: UInt64,
     priority: FlowTransactionScheduler.Priority
 )
@@ -89,35 +113,46 @@ If the position already has an entry in the registry, the new trigger is appende
 Registration is rejected if:
 
 - At least one bound is not specified.
+- Both bounds are specified and `hMin >= hMax`.
 - `priority` is `High`. High priority is reserved for the scheduler's internal use and can panic if the requested time slot is full. Only `Low` and `Medium` are accepted for callbacks.
 - `executionEffort` is outside `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().priorityEffortLimit[priority]]`. This is a tighter bound than `maximumIndividualEffort` — each priority level has its own effort pool, and exceeding it would cause `schedule()` to panic.
 - The `callback` capability does not exist (i.e. `callback.check()` fails).
-- The `provider` capability does not exist or has insufficient funds. "Sufficient funds" means `provider.borrow().balance >= FlowTransactionScheduler.calculateFee(executionEffort: executionEffort, priority: priority, dataSizeMB: 0.0)`.
 
-These capabilities are validated at registration but may become unavailable later (see [`TriggerRemoved`](#events) event).
+The callback capability is validated at registration but may become unavailable later (see [`TriggerRemoved`](#events) event).
 
 **Return value:** Registration never panics. It returns a boolean indicating success or failure. On success, emits `TriggerRegistered`. All validation checks use non-panicking operations (capability `check()`, optional chaining, value comparisons).
 
-**Access control:** Registration is public. Since the registering party pays for callback execution (via the `provider` capability), there is no execution cost to the protocol and no need for additional permissioning. Storage costs are absorbed by the **HTM** account for now (see [Future Expansions](#8-future-expansions)).
+**Access control:** Registration requires the `Register` entitlement. The **HTM** issues entitled capabilities to authorized callers (e.g. FYV). Since the protocol's operational-costs vault funds all callback execution, registration must be restricted to prevent unbounded cost to the protocol. Storage costs are absorbed by the **HTM** account for now (see [Future Expansions](#8-future-expansions)).
+
+### Transaction Handlers
+
+The **HTM** contract defines two internal resource types that conform to `FlowTransactionScheduler.TransactionHandler`: **HeartbeatHandler** and **ProcessHandler**. One instance of each is created during contract init and stored in the **HTM** account at well-known storage paths. Capabilities of type `Capability<auth(FlowTransactionScheduler.Execute) &{FlowTransactionScheduler.TransactionHandler}>` are issued for each and stored as contract fields so they can be passed to `FlowTransactionScheduler.schedule()`.
+
+Because both resource types are defined inside the **HTM** contract, their `executeTransaction` implementations can call `access(contract)` functions on `HealthTriggerManager` to read and mutate the registry, configuration, and operational vault. No additional capabilities to the registry are needed — the contract-scoped access is sufficient.
+
+- **HeartbeatHandler**: `executeTransaction` delegates to a contract-level `_heartbeat()` function that checks `keepHeartbeatRunning`, reschedules itself, and schedules one or more Process TXs.
+- **ProcessHandler**: `executeTransaction` delegates to a contract-level `_process()` function that iterates the registry, evaluates health, and schedules callbacks. The same `_process()` function backs the public `process()` entry point, so the behavior is identical whether invoked via the scheduler or called directly.
 
 ### Scheduling
 
 The **HTM** uses two scheduled transactions: **Heartbeat** and **Process**. Heartbeat schedules a Process TX and then reschedules itself. Separating the two ensures that the Heartbeat chain always continues, even if Process fails, and leaves room for future recovery and scaling logic inside Heartbeat.
 
-**Configuration:**
+**Configuration:** All configuration fields are stored in the `Registry` resource and changeable by admin. Defaults are listed in [Initialization](#initialization).
 
-- `HeartbeatInterval`: how often health triggers are checked. Must be between 1s and 1 day (86 400s). Can be changed by admin at any time; the new value is picked up on the next Heartbeat reschedule.
-- Operational-costs vault capability: used to fund the Heartbeat and Process scheduled transactions the **HTM** creates. Out-of-bounds callbacks pay for themselves via the supplied `Provider` capability. Defaults to the HTM account's own FlowToken vault at init; can be changed via an admin function.
-- `keepHeartbeatRunning` (Bool): controls whether the Heartbeat chain continues. When `true`, each Heartbeat reschedules itself; when `false`, the chain stops after the current cycle. Defaults to `true`. Setting this value requires admin entitlements.
-- `minHeartbeatExecutionEffort` (UInt64): the execution effort used when scheduling Heartbeat TXs, set to `max(FlowTransactionScheduler.minimumExecutionEffort, minHeartbeatExecutionEffort)`. Defaults to `50`. Setting this value requires admin entitlements.
+- `HeartbeatInterval`: how often health triggers are checked. The new value is picked up on the next Heartbeat reschedule.
+- `operationalVaultCap`: funds all scheduled transactions (Heartbeat, Process, and callbacks). See [Funding](#funding).
+- `keepHeartbeatRunning`: when `true`, each Heartbeat reschedules itself; when `false`, the chain stops after the current cycle.
+- `minHeartbeatExecutionEffort`: the Heartbeat execution effort is `max(FlowTransactionScheduler.minimumExecutionEffort, minHeartbeatExecutionEffort)`.
 
 **Transaction types:**
 
-- **Heartbeat** checks `keepHeartbeatRunning`. If `true`, it reschedules itself (timestamp: now + HeartbeatInterval) and schedules one or more Process TXs. If `false`, it does not reschedule and the chain stops. Heartbeat is scheduled with execution effort `max(FlowTransactionScheduler.minimumExecutionEffort, minHeartbeatExecutionEffort)`. In the future it may schedule multiple Process TXs (e.g., one per shard) and detect/recover failed ones.
-- **Process** is scheduled at now + 1s with execution effort returned by `HTM.estimateProcessExecutionEffort()` (must not panic). For now this function returns `9999` (see [Future Expansions](#8-future-expansions) item 4). See [Process](#process) for the full processing logic. Process is public — anyone can call it directly (e.g. via a regular transaction) without waiting for the next Heartbeat cycle. This is safe because Process is idempotent and all callback costs are borne by the registrants' `Provider` capabilities, not by the caller. The caller only pays normal transaction fees for the Process TX itself.
+- **Heartbeat** checks `keepHeartbeatRunning`. If `true`, it reschedules itself (timestamp: now + HeartbeatInterval) and schedules one or more Process TXs. If `false`, it does not reschedule and the chain stops. In the future it may schedule multiple Process TXs (e.g., one per shard) and detect/recover failed ones.
+- **Process** is scheduled at now + 1s using Medium priority. The execution effort is `min(HTM.estimateProcessExecutionEffort(), FlowTransactionScheduler.getConfig().priorityEffortLimit[Medium])` — clamped to the scheduler's Medium priority limit to prevent scheduling failures. `estimateProcessExecutionEffort()` (must not panic) returns `9999` for now (see [Future Expansions](#8-future-expansions) item 4). See [Process](#process) for the full processing logic.
+
+  Process is also public — anyone can call it directly (e.g. via a regular transaction) without waiting for the next Heartbeat cycle. This is safe because Process is idempotent and all callback costs are borne by the operational-costs vault.
 - **Callback TX** is the caller's `TransactionHandler` scheduled directly via `FlowTransactionScheduler.schedule()` at now + 1s with the trigger's `executionEffort` and `priority`. It runs in isolation — a panic in one callback does not affect others or the Process/Heartbeat chain. See [HealthCallback](#healthcallback).
 
-Heartbeat and Process TXs use Low priority. Callback TXs use the priority specified at registration (Low or Medium only — High is not allowed, see [Registration](#registration)).
+Heartbeat TXs use Low priority. Process TXs use Medium priority (to accommodate higher execution effort). Callback TXs use the priority specified at registration (Low or Medium only — High is not allowed, see [Registration](#registration)).
 
 An admin-only `startHeartbeat()` function sets `keepHeartbeatRunning` to `true` and schedules the first Heartbeat TX to bootstrap the chain. The same function is used to restart the chain after it has stopped (see [Recovery](#recovery)). Calling `startHeartbeat()` while a chain is already running creates a redundant parallel chain — this wastes operational funds but is not unsafe (Process is idempotent). The admin should verify the chain is stopped (absence of `HeartbeatRescheduled` events) before calling `startHeartbeat()`.
 
@@ -126,6 +161,8 @@ The `@ScheduledTransaction` resources returned by `FlowTransactionScheduler.sche
 ### Process
 
 Process iterates over every position in the registry. For each position it evaluates health once, then checks all of that position's triggers against the result.
+
+**Iteration strategy:** Process iterates over a snapshot of position keys, not the live dictionary. For each position, the trigger list is copied out, each trigger is evaluated, and only surviving triggers are written back to the registry. If no triggers survive, the position entry is removed. Side effects (callback scheduling, event emission) occur during the per-position pass. This avoids mutating the dictionary or its nested arrays during iteration — a requirement of Cadence's value semantics for nested containers.
 
 **1. Evaluate health.** Call $$H(P)$$ once for the position.
 
@@ -136,11 +173,10 @@ Process iterates over every position in the registry. For each position it evalu
 **2. For each trigger on the position:**
 
 - If $$H_{\textbf{min}} \leq H(P) \leq H_{\textbf{max}}$$ (within bounds) → no action. Continue to the next trigger.
-- The trigger is out of bounds. Validate capabilities:
-  - The `callback` capability still exists (`callback.check()`).
-  - The `provider` capability still exists and has sufficient balance to cover `FlowTransactionScheduler.calculateFee(executionEffort: trigger.executionEffort, priority: trigger.priority, dataSizeMB: 0.0)`.
-- If any check fails, remove the trigger and emit `TriggerRemoved` with the corresponding reason string (see [Events](#events)). Continue to the next trigger.
-- Capabilities valid → before scheduling, re-validate that `executionEffort` is still within `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().priorityEffortLimit[priority]]` (scheduler config may have changed since registration). If invalid, remove the trigger and emit `TriggerRemoved` with reason `"TRIGGER_EXECUTION_EFFORT_INVALID"`. Otherwise, remove the trigger from the registry, withdraw the fee from the `provider`, and schedule the `callback` via `FlowTransactionScheduler.schedule(handlerCap: trigger.callback, data: nil, ...)`. Emit `CallbackScheduled`.
+- The trigger is out of bounds. Validate:
+  - The `callback` capability still exists (`callback.check()`). If not, remove the trigger and emit `TriggerRemoved` with reason `"TRIGGER_CALLBACK_UNAVAILABLE"`. Continue to the next trigger.
+  - Re-validate that `executionEffort` is still within `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().priorityEffortLimit[priority]]` (scheduler config may have changed since registration). If invalid, remove the trigger and emit `TriggerRemoved` with reason `"TRIGGER_EXECUTION_EFFORT_INVALID"`. Continue to the next trigger.
+- Validation passed → remove the trigger from the registry, withdraw the callback fee from the operational-costs vault, and schedule the `callback` via `FlowTransactionScheduler.schedule(handlerCap: trigger.callback, data: nil, ...)`. Emit `CallbackScheduled`.
 
 After all positions have been processed, emit `PositionsProcessed` with the number of positions and triggers checked.
 
@@ -168,7 +204,7 @@ flowchart TD
     EVAL -->|No| TRIG_LOOP["For each trigger on position"]
     TRIG_LOOP --> CHECK{"H(P) within\ntrigger bounds?"}
     CHECK -->|Yes| NEXT_TRIG["Next trigger"]
-    CHECK -->|No| VALID{"Provider & Callback\ncapabilities valid?"}
+    CHECK -->|No| VALID{"Callback valid &\nexecutionEffort valid?"}
     VALID -->|Yes| REMOVE["Remove trigger"]
     REMOVE --> SCHED_CB["Schedule HealthCallback TX"]
     SCHED_CB --> NEXT_TRIG
@@ -189,11 +225,11 @@ flowchart TD
 
 The caller's callback is a resource implementing `FlowTransactionScheduler.TransactionHandler`, stored in the caller's account. When a trigger fires, the HTM passes the caller's `callback` capability directly to `FlowTransactionScheduler.schedule()` with `data: nil`. The scheduler invokes `executeTransaction(id:, data:)` on the caller's resource; the caller's implementation should ignore both parameters and query the current position state itself.
 
-**Panic isolation:** The callback could panic. Because each callback runs in its own scheduled transaction, a panicking callback only reverts its own TX — it does not affect other callbacks, the Process TX, or the Heartbeat chain. No user code runs during Process itself — Process only reads capability handles, FlowToken vault balances, and Pool state.
+**Panic isolation:** The callback could panic. Because each callback runs in its own scheduled transaction, a panicking callback only reverts its own TX — it does not affect other callbacks, the Process TX, or the Heartbeat chain. No user code runs during Process itself — Process only reads capability handles and Pool state.
 
 ### Funding
 
-The **HTM** holds a capability to an operational-costs vault. It draws from this vault to fund the Heartbeat and Process scheduled transactions. Callback TXs are funded by withdrawing the exact fee (computed via `FlowTransactionScheduler.calculateFee()`) from the `provider` capability supplied at registration.
+The **HTM** holds a capability to an operational-costs vault. It draws from this vault to fund all scheduled transactions: Heartbeat, Process, and callback TXs. The callback fee is computed via `FlowTransactionScheduler.calculateFee()` and withdrawn from the operational-costs vault at the time the callback is scheduled (during Process).
 
 ### Events
 
@@ -235,8 +271,6 @@ access(all) event TriggerRemoved(
 ```
 
 **`TriggerRemoved` reason strings:**
-- `"TRIGGER_PROVIDER_INSUFFICIENT_FUNDS"` — the provider capability exists but has insufficient balance to fund the callback TX.
-- `"TRIGGER_PROVIDER_UNAVAILABLE"` — the provider capability no longer exists or has been revoked.
 - `"TRIGGER_CALLBACK_UNAVAILABLE"` — the callback capability no longer exists or has been revoked.
 - `"TRIGGER_POSITION_DOES_NOT_EXIST"` — the health function returned `nil` and `positionExists` confirmed the position no longer exists.
 - `"TRIGGER_EXECUTION_EFFORT_INVALID"` — the trigger's `executionEffort` is no longer within the scheduler's allowed range (config changed since registration).
@@ -263,8 +297,10 @@ access(all) event TriggerRemoved(
 **`FlowTransactionScheduler`:**
 
 - `FlowTransactionScheduler.getConfig()` must not panic. Registration calls it to validate `executionEffort` bounds.
-- `FlowTransactionScheduler.calculateFee()` must not panic. Registration calls it to check whether the provider has sufficient funds.
-- `FlowTransactionScheduler.schedule()` must not panic when called with parameters that pass `estimate()` validation and sufficient fees. The HTM pre-validates all parameters before calling `schedule()` (see [Process](#process) and [Scheduling](#scheduling)).
+- `FlowTransactionScheduler.calculateFee()` must not panic. Process calls it to compute callback fees before withdrawal from the operational-costs vault.
+- `FlowTransactionScheduler.schedule()` must not panic when called with parameters that pass `estimate()` validation and sufficient fees. The HTM pre-validates all parameters before calling `schedule()` (see [Process](#process) and [Scheduling](#scheduling)).[^2]
+
+[^2]: In the current scheduler implementation, `schedule()` can still panic if all time slots for the requested priority are exhausted — `calculateScheduledTimestamp` enters an unbounded search loop that runs out of gas. This is not preventable by pre-validation. If it occurs during Process, the entire Process TX reverts. This is considered unlikely for a low-traffic system but would cause the same recovery path as any other Process failure (see [Recovery](#recovery)).
 
 **Health trigger registry:**
 
@@ -303,9 +339,10 @@ To make sure the **HTM** is working as expected:
 
 1. Scaling to a larger registry (dynamic sharding into multiple registries, each processed independently).
 2. Grouped callbacks: multiple triggers sharing a single callback to reduce costs, accepting that a panic in one callback can prevent others in the group from being called.
-3. Storage deposit: charge a small fixed amount from the `Provider` at registration to cover storage costs. When the trigger fires, the deposit is used as partial payment for the callback's scheduled transaction.
+3. Storage deposit: charge a small fixed amount at registration to cover storage costs. When the trigger fires, the deposit is used as partial payment for the callback's scheduled transaction.
 4. Adaptive Process execution effort: refine `HTM.estimateProcessExecutionEffort()` to dynamically estimate based on registry size and observed execution costs, replacing the current hardcoded `9999`.
 5. Panic-tolerant processing via randomized partitioning: split the registry into N parts (e.g. via bitmasking on trigger ID) and schedule a separate Process TX for each part. A panicking health function only fails the Process TX for its partition. By choosing the partition differently each cycle (e.g. rotating the bitmask), the system tolerates up to N−1 panicking health functions — healthy triggers that share a partition with a panicking one in one cycle will be assigned to a different partition in the next. Additionally, Heartbeat could detect failed Process TXs (e.g. by tracking which partitions completed) and use binary search across partitions to locate and remove the trigger with the panicking health function.
+6. User-funded health triggers: make registration public and re-add a per-trigger `provider: Capability<auth(FungibleToken.Withdraw) &FlowToken.Vault>` so that anyone can register triggers at their own cost. This removes the need for the `Register` entitlement and shifts callback execution costs from the protocol to the registrant. **Caveat:** if the provider capability points to an account's default FlowToken vault and that account's balance drops below the minimum storage balance, the withdrawal during Process will panic and revert the entire Process TX. Mitigation options include pre-checking the post-withdrawal balance against the minimum account balance, or requiring providers to use a dedicated vault separate from the account's default storage-fee vault.
 
 ## 9 Open Questions
 
