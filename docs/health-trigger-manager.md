@@ -19,31 +19,25 @@ sequenceDiagram
 
     Note over FYV, HTM: Registration
     FYV->>HTM: Register
-    HTM->>ALP: H(P)
-    ALP-->>HTM: health (within bounds)
     HTM-->>FYV: success
 
-    Note over Scheduler, HTM: Heartbeat cycle — position still healthy
-    Scheduler->>HTM: Heartbeat TX
-    HTM->>Scheduler: schedule Process TX
-    HTM->>Scheduler: reschedule Heartbeat TX
-    Scheduler->>HTM: Process TX
-    HTM->>ALP: H(P)
-    ALP-->>HTM: health (within bounds)
-    Note right of HTM: No action needed
+    loop Heartbeat cycle
+        Scheduler->>HTM: Heartbeat TX
+        HTM->>Scheduler: schedule Process TX
+        HTM->>Scheduler: reschedule Heartbeat TX
+        Scheduler->>HTM: Process TX
+        HTM->>ALP: H(P)
+        ALP-->>HTM: health
 
-    Note over Scheduler, HTM: Heartbeat cycle — position out of bounds
-    Scheduler->>HTM: Heartbeat TX
-    HTM->>Scheduler: schedule Process TX
-    HTM->>Scheduler: reschedule Heartbeat TX
-    Scheduler->>HTM: Process TX
-    HTM->>ALP: H(P)
-    ALP-->>HTM: health (out of bounds)
-    HTM->>HTM: remove HealthTrigger from registry
-    HTM->>Scheduler: schedule Callback TX
-    Scheduler->>FYV: Callback TX (HealthCallback)
-    Note right of FYV: FYV rebalances position,<br/>then may re-register
-
+        alt within bounds
+            Note right of HTM: No action needed
+        else out of bounds
+            HTM->>HTM: remove HealthTrigger from registry
+            HTM->>Scheduler: schedule Callback TX
+            Scheduler->>FYV: Callback TX (HealthCallback)
+            Note right of FYV: FYV rebalances position,<br/>then may re-register
+        end
+    end
 ```
 
 ## 3 Design
@@ -90,18 +84,19 @@ If the position already has an entry in the registry, the new trigger is appende
 
 **Bounds:** A trigger may specify only a lower bound, only an upper bound, or both. For example, a liquidation trigger only needs a lower bound, while a rebalancing trigger typically specifies both.
 
-**Validation:** Registration is rejected if:
+**Validation:** Registration does not evaluate $$H(P)$$. It is valid to register triggers for positions that are already out of bounds, do not exist yet, or whose health cannot currently be determined. Process will handle these cases on the next cycle.
+
+Registration is rejected if:
 
 - At least one bound is not specified.
-- `executionEffort` is outside `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().maximumIndividualEffort]`.
-- $$H(P)$$ returns `nil` (the position does not exist or its health cannot be determined).
-- The position is already out of bounds ($$H(P) < H_{\textbf{min}}$$ or $$H(P) > H_{\textbf{max}}$$, for whichever bounds are specified). This prevents registering triggers that would fire immediately, which would be wasteful and could mask bugs in the caller's logic.
+- `priority` is `High`. High priority is reserved for the scheduler's internal use and can panic if the requested time slot is full. Only `Low` and `Medium` are accepted for callbacks.
+- `executionEffort` is outside `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().priorityEffortLimit[priority]]`. This is a tighter bound than `maximumIndividualEffort` — each priority level has its own effort pool, and exceeding it would cause `schedule()` to panic.
 - The `callback` capability does not exist (i.e. `callback.check()` fails).
 - The `provider` capability does not exist or has insufficient funds. "Sufficient funds" means `provider.borrow().balance >= FlowTransactionScheduler.calculateFee(executionEffort: executionEffort, priority: priority, dataSizeMB: 0.0)`.
 
 These capabilities are validated at registration but may become unavailable later (see [`TriggerRemoved`](#events) event).
 
-**Return value:** Registration panics on validation failure. On success, emits `TriggerRegistered`.
+**Return value:** Registration never panics. It returns a boolean indicating success or failure. On success, emits `TriggerRegistered`. All validation checks use non-panicking operations (capability `check()`, optional chaining, value comparisons).
 
 **Access control:** Registration is public. Since the registering party pays for callback execution (via the `provider` capability), there is no execution cost to the protocol and no need for additional permissioning. Storage costs are absorbed by the **HTM** account for now (see [Future Expansions](#8-future-expansions)).
 
@@ -122,7 +117,7 @@ The **HTM** uses two scheduled transactions: **Heartbeat** and **Process**. Hear
 - **Process** is scheduled at now + 1s with execution effort returned by `HTM.estimateProcessExecutionEffort()` (must not panic). For now this function returns `9999` (see [Future Expansions](#8-future-expansions) item 4). See [Process](#process) for the full processing logic. Process is public — anyone can call it directly (e.g. via a regular transaction) without waiting for the next Heartbeat cycle. This is safe because Process is idempotent and all callback costs are borne by the registrants' `Provider` capabilities, not by the caller. The caller only pays normal transaction fees for the Process TX itself.
 - **Callback TX** is the caller's `TransactionHandler` scheduled directly via `FlowTransactionScheduler.schedule()` at now + 1s with the trigger's `executionEffort` and `priority`. It runs in isolation — a panic in one callback does not affect others or the Process/Heartbeat chain. See [HealthCallback](#healthcallback).
 
-Heartbeat and Process TXs use Low priority. Callback TXs use the priority specified at registration.
+Heartbeat and Process TXs use Low priority. Callback TXs use the priority specified at registration (Low or Medium only — High is not allowed, see [Registration](#registration)).
 
 An admin-only `startHeartbeat()` function sets `keepHeartbeatRunning` to `true` and schedules the first Heartbeat TX to bootstrap the chain. The same function is used to restart the chain after it has stopped (see [Recovery](#recovery)). Calling `startHeartbeat()` while a chain is already running creates a redundant parallel chain — this wastes operational funds but is not unsafe (Process is idempotent). The admin should verify the chain is stopped (absence of `HeartbeatRescheduled` events) before calling `startHeartbeat()`.
 
@@ -145,7 +140,7 @@ Process iterates over every position in the registry. For each position it evalu
   - The `callback` capability still exists (`callback.check()`).
   - The `provider` capability still exists and has sufficient balance to cover `FlowTransactionScheduler.calculateFee(executionEffort: trigger.executionEffort, priority: trigger.priority, dataSizeMB: 0.0)`.
 - If any check fails, remove the trigger and emit `TriggerRemoved` with the corresponding reason string (see [Events](#events)). Continue to the next trigger.
-- Capabilities valid → remove the trigger from the registry, withdraw the fee from the `provider`, and schedule the `callback` via `FlowTransactionScheduler.schedule(handlerCap: trigger.callback, data: nil, ...)`. Emit `CallbackScheduled`.
+- Capabilities valid → before scheduling, re-validate that `executionEffort` is still within `[FlowTransactionScheduler.getConfig().minimumExecutionEffort, FlowTransactionScheduler.getConfig().priorityEffortLimit[priority]]` (scheduler config may have changed since registration). If invalid, remove the trigger and emit `TriggerRemoved` with reason `"TRIGGER_EXECUTION_EFFORT_INVALID"`. Otherwise, remove the trigger from the registry, withdraw the fee from the `provider`, and schedule the `callback` via `FlowTransactionScheduler.schedule(handlerCap: trigger.callback, data: nil, ...)`. Emit `CallbackScheduled`.
 
 After all positions have been processed, emit `PositionsProcessed` with the number of positions and triggers checked.
 
@@ -244,15 +239,16 @@ access(all) event TriggerRemoved(
 - `"TRIGGER_PROVIDER_UNAVAILABLE"` — the provider capability no longer exists or has been revoked.
 - `"TRIGGER_CALLBACK_UNAVAILABLE"` — the callback capability no longer exists or has been revoked.
 - `"TRIGGER_POSITION_DOES_NOT_EXIST"` — the health function returned `nil` and `positionExists` confirmed the position no longer exists.
+- `"TRIGGER_EXECUTION_EFFORT_INVALID"` — the trigger's `executionEffort` is no longer within the scheduler's allowed range (config changed since registration).
 
 **Completion observability:** The HTM does not emit its own completion event. When a callback executes successfully, `FlowTransactionScheduler` emits an `Executed` event whose `id` matches the `scheduledTransactionID` in `CallbackScheduled`. If the callback panics, the TX reverts and no `Executed` event is emitted.
 
 ## 4 Assumptions
 
-**Health function (`FlowALP.Pool.getPositionHealth`):**
+**Health function (`FlowALP.Pool.getPositionHealth`) and `FlowALP.Pool.positionExists`:**
 
-- Must not panic. If it does, Process will fail and [recovery](#recovery) will be needed.
-- May return `nil` to indicate the health could not be determined. This can happen if the position no longer exists or if there is a temporary issue (e.g. an oracle is unavailable). Process distinguishes between these cases using `FlowALP.Pool.positionExists` (see [Process](#process)).
+- Both must not panic. If either does, Process will fail and [recovery](#recovery) will be needed.
+- `getPositionHealth` may return `nil` to indicate the health could not be determined. This can happen if the position no longer exists or if there is a temporary issue (e.g. an oracle is unavailable). Process distinguishes between these cases using `positionExists` (see [Process](#process)).
 
 **`HealthCallback`:**
 
@@ -263,6 +259,12 @@ access(all) event TriggerRemoved(
 - The `HealthCallback` must be safe to call multiple times.[^1]
 
 [^1]: A recovery mechanism may invoke the callback directly via a transaction to bypass a scheduled transaction that has not yet executed (i.e. "jump the queue"). This means the same callback could run both through the direct invocation and through the previously scheduled transaction.
+
+**`FlowTransactionScheduler`:**
+
+- `FlowTransactionScheduler.getConfig()` must not panic. Registration calls it to validate `executionEffort` bounds.
+- `FlowTransactionScheduler.calculateFee()` must not panic. Registration calls it to check whether the provider has sufficient funds.
+- `FlowTransactionScheduler.schedule()` must not panic when called with parameters that pass `estimate()` validation and sufficient fees. The HTM pre-validates all parameters before calling `schedule()` (see [Process](#process) and [Scheduling](#scheduling)).
 
 **Health trigger registry:**
 
