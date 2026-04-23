@@ -32,7 +32,6 @@ The spec takes the following as given. If any is violated, the conclusions below
 
 - **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources — uncorrelated in their failure and manipulation modes. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
 - **Sources attest `publishTime` truthfully.** A source reports the wall-clock instant at which its value was observed, up to bounded skew. If sources lie about time, staleness checks (N3) are defeated.
-- **`block.timestamp` approximates wall-clock time within bounded skew.** The staleness check compares `block.timestamp − reading.publishTime` against a configured bound; the comparison is meaningful only to the skew's precision.
 - **Majority-honest sources (Byzantine bound).** Across N sources, fewer than ⌈N/2⌉ are simultaneously compromised or stale. Required for median aggregation to be robust and for the spread check to be a useful signal.
 
 ## Nomenclature
@@ -205,12 +204,10 @@ Rationale:
 
 ```cadence
 access(all) struct AggregatorOracle: PriceOracle {
-    // Config units/representations are placeholders — concrete choice deferred to implementation.
     access(self) let _token: Type
     access(self) let _unitOfAccount: Type
-    access(self) let sources: [{PriceOracle}]
-    access(self) let spreadThreshold: UFix64                // unit TBD at impl
-    access(self) let stalenessBound: UFix64                 // seconds
+    access(self) let _sources: [{PriceOracle}]
+    // plus config for staleness (N3), spread (N5), aggregation
 
     access(all) view fun unitOfAccount(): Type { return self._unitOfAccount }
 
@@ -231,15 +228,25 @@ access(all) struct AggregatorOracle: PriceOracle {
 
 Open question (Open Questions). Candidates:
 
-- **Median** — Byzantine-robust to `(N−1)/2` compromised feeds; degenerate at N=2. **Dominant in prior art:** MakerDAO Medianizer, Chainlink OCR, Band all use median.
-- **Arithmetic mean** — simpler; biased by outliers; needs tight N5 spread threshold to bound outlier exposure. No major safety-oriented on-chain oracle uses plain mean.
-- **Weighted mean** — per-source reliability weights; more parameters. **Prior art:** Pyth uses confidence-weighted aggregation.
+- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds available on Flow today), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is load-bearing — it IS the outlier defense. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N), but forced on us at launch by Flow's limited source ecosystem.
+- **Median** — Byzantine-robust to `(N−1)/2` compromised feeds; meaningful only at N≥3. Used by MakerDAO Medianizer, Chainlink OCR (Data Feeds), and Band Protocol. Becomes the right default once we can onboard additional independent sources (DEX-derived, additional bridges) — research item for mature launch.
+- **Weighted median** — per-source weights, typically inverse of stated confidence. Used by Pyth Network across its publishers. Not viable at FCM launch because only Pyth publishes confidence on Flow; BandOracle and DEX sources don't. Possible later if we standardize confidence across adopted sources.
 
 At expected source counts (likely 2–3), the choice matters less than the N5 threshold. Decide once source shortlist is concrete.
 
 ## Extension: Volatility Circuit Breaker
 
 The volatility circuit breaker (optional in the initial deployment, mature MUST) is a *temporal* safety layer that wraps the aggregator. Complementary to the *spatial* source-spread check (N5): N5 catches **single-source manipulation** (one source disagreeing with the others — caught per-tick by spread); the breaker catches **correlated fast movement of the aggregate itself** (median shifting too quickly, e.g., all sources reflecting a flash-crash or a coordinated manipulation across venues) — which N5 cannot see because every source agrees.
+
+### Scope — what the breaker is measuring
+
+The breaker sits between the aggregator and the protocol's consumers. Its **input** is the aggregator's output stream `{(pₖ, τₖ)}`. Its **output** — the trip-gated, cached subset accepted into `history.last` — is the sole price of record that consumers (ALP, FYV) read for liquidation decisions.
+
+`σ̂²` is computed on the raw input stream (every observation, regardless of trip outcome) so the breaker can detect anomalies in what the aggregator is producing before those anomalies become the protocol's price.
+
+Concretely: if `pₖ` jumps 30% while the underlying asset `X(t)` jumps 2%, the breaker trips and the 30% move never reaches the protocol — `history.last` stays at the last accepted value until the regime stabilizes or staleness fires nil. Conversely, if `pₖ` smoothly tracks `X(t)`, observations flow through normally. The breaker is not trying to recover the latent asset's "true" volatility; it's measuring the statistic of the aggregator's output because that stream produces the protocol's price of record.
+
+**Scope assumption.** This framing assumes FCM's protocol actions use `pₖ` as the sole price of record. If the protocol adds alternate price paths (manual overrides, backup feeds, hybrid decision trees), the breaker's narrow `pₖ`-anomaly scope no longer covers liquidation safety and this section must be revisited.
 
 ### Design: wrap, don't bake in; aggregate-level layering
 
@@ -264,49 +271,53 @@ Mutable persistent state (`history`) is a `CircuitBreaker` *resource* stored on 
 // call directly into this resource — no separate handler needed.
 access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler, ViewResolver.Resolver {
     // Immutable identity + config (set at init).
-    // Units/representations are placeholders — concrete choice (bps vs fraction vs log-ratio, etc.)
-    // is deferred to implementation and calibrated per token.
-    access(all) let token: Type
-    access(all) let unitOfAccount: Type
-    access(all) let upstream: Capability<&{PriceOracle}>     // the oracle being wrapped
-    access(all) let deviationThreshold: UFix64               // unit TBD at impl
-    access(all) let historyWindow: UFix64                    // seconds
-    access(all) let stalenessBound: UFix64                   // seconds
+    access(self) let _token: Type
+    access(self) let _unitOfAccount: Type
+    access(self) let _upstream: Capability<&{PriceOracle}>   // the oracle being wrapped
+    // plus config for staleness bound (N3), deviation threshold (trip), history window, etc.
 
-    access(all) var history: [PriceReading]                  // bounded ring buffer
+    access(self) let _history: [PriceReading]                // accepted observations; consumers read via current()
+    access(self) var _prevObservation: PriceReading?         // most recent observation (accepted OR tripped); base for σ̂² update chain
+    access(self) var _sigmaSquared: UFix64                   // running variance estimate
 
-    // Called by FlowTransactionScheduler on the configured cadence.
-    // Signature matches FlowTransactionScheduler.TransactionHandler exactly.
-    access(FlowTransactionScheduler.Execute)
-    fun executeTransaction(id: UInt64, data: AnyStruct?) {
-        // 1. Pull PriceReading from self.upstream.
-        //    If borrow fails or reading is nil → no-op this tick.
-        // 2. reading.publishTime ≤ history.last?.publishTime → no-op (event-driven).
-        // 3. Prune history outside [reading.publishTime − self.historyWindow, reading.publishTime].
-        // 4. Compute deviation against the remaining window.
-        // 5. If deviation > self.deviationThreshold → emit a trip event; DO NOT append.
-        //    Else → append reading; emit an acceptance event.
-    }
+    // Public method surface — external callers go through methods, not field reads.
+    access(all) view fun token(): Type { return self._token }
+    access(all) view fun unitOfAccount(): Type { return self._unitOfAccount }
 
-    // ViewResolver.Resolver conformance (required by TransactionHandler).
-    access(all) view fun getViews(): [Type] { return [] }
-    access(all) fun resolveView(_ view: Type): AnyStruct? { return nil }
-
-    // Single-point read: returns the last reading accepted by executeTransaction
-    // (validity at acceptance from B-VI) iff it is still within self.stalenessBound.
+    // Single-point read: returns the last accepted reading iff still within the staleness bound.
     //   - history empty → nil (warm-up).
-    //   - history.last.publishTime aged past self.stalenessBound → nil (N3).
+    //   - history.last aged past staleness → nil (N3).
     //     This is how failed ticks (panic / stall / persistent trip) surface
     //     to consumers: history stops advancing, staleness fires nil.
     //   - otherwise → history.last.
     access(all) view fun current(): PriceReading? {
         return nil  // placeholder
     }
+
+    // Called by FlowTransactionScheduler on the configured cadence.
+    // Signature matches FlowTransactionScheduler.TransactionHandler exactly.
+    access(FlowTransactionScheduler.Execute)
+    fun executeTransaction(id: UInt64, data: AnyStruct?) {
+        // 1. Pull (pₖ, τₖ) from self._upstream.
+        //    If borrow fails or reading is nil → no-op this tick.
+        // 2. If self._prevObservation is nil (warm-up) → set it, skip σ̂²/trip eval.
+        // 3. Compute uₖ = log(pₖ / prev.value) / √(τₖ − prev.publishTime).
+        // 4. Evaluate trip: |uₖ| > k · sqrt(self._sigmaSquared) ?
+        //    If trip → emit trip event; DO NOT append to history.
+        //    Else   → append reading to history; emit acceptance event.
+        // 5. Update self._sigmaSquared via EMA (always, regardless of trip).
+        // 6. Prune history outside [τₖ − historyWindow, τₖ].
+        // 7. Update self._prevObservation = reading (always, regardless of trip).
+    }
+
+    // ViewResolver.Resolver conformance (required by TransactionHandler).
+    access(all) view fun getViews(): [Type] { return [] }
+    access(all) fun resolveView(_ view: Type): AnyStruct? { return nil }
 }
 
 // Queryable shell held by consumers. Forwards to the underlying CircuitBreaker.
 access(all) struct CircuitBreakerOracle: PriceOracle {
-    access(self) let breaker: Capability<&CircuitBreaker>
+    access(self) let _breaker: Capability<&CircuitBreaker>
     // UoA and token are immutable (Invariant I), so we snapshot at construction.
     // unitOfAccount() and the token-match branch in price() stay panic-free
     // even if the underlying resource is later destroyed.
@@ -317,9 +328,9 @@ access(all) struct CircuitBreakerOracle: PriceOracle {
         // Init-time panic is loud (deployment fails) and acceptable — the oracle
         // never exists in a broken state. Post-init, queries never panic.
         let b = breaker.borrow() ?? panic("CircuitBreakerOracle: capability does not resolve")
-        self.breaker = breaker
-        self._unitOfAccount = b.unitOfAccount
-        self._token = b.token
+        self._breaker = breaker
+        self._unitOfAccount = b.unitOfAccount()
+        self._token = b.token()
     }
 
     access(all) view fun unitOfAccount(): Type {
@@ -348,7 +359,7 @@ The `CircuitBreaker` resource serves two purposes at once: it's the stateful tim
 - **Funding.** Protocol treasury funds `MinimumStorageReservation` — same mechanism as scheduled-tx execution. Bounded: `O(maxHistoryEntries × sizeof(PriceReading))`; `maxHistoryEntries` capped at init, never grows.
 - **Creation.** Protocol deployment creates the resource at init and issues a public `Capability<&CircuitBreaker>` for the `CircuitBreakerOracle` struct to hold. Scheduled invocation of `executeTransaction` is registered separately via `FlowTransactionScheduler.schedule(...)`, which manages the `Execute`-entitled handle internally. An off-chain-indexable creation event is emitted.
 - **Teardown.** Protocol deployment destroys the resource, paired with descheduling the scheduled tx. Downstream borrows return nil → consumers fail-closed. A matching teardown event is emitted.
-- **Capability topology enforces invariant II.** The struct's capability is unentitled, and `history` is `access(self)` — no external reference can mutate state regardless of what caller holds the cap.
+- **Capability topology enforces invariant II.** The struct's capability is unentitled, and all resource state is `access(self)` — no external reference can mutate state regardless of what caller holds the cap.
 
 ### Scheduled execution is required
 
@@ -358,18 +369,74 @@ The breaker depends on `FlowTransactionScheduler` calling `executeTransaction` o
 
 **Precedent for scheduled-cadence update mechanisms:** MakerDAO OSM's `poke()` (keeper-driven, 1-hour delay), Chainlink Data Feeds (OCR heartbeat + deviation), Pyth Network (caller-pays pull model). Different incentive models, same "external cadence drives state" pattern. Flow's native scheduler is equivalent but protocol-funded (no keeper-network unreliability or caller-pays-to-update complication).
 
-### Metric shape — implementation choice
+### Metric shape
 
-Not prescribed. Defensible shapes:
+**Recommended default: time-weighted EMA of variance with configurable trip threshold.**
 
-- **Last-known-good comparison** — `|Δ log p|` vs last accepted. Minimal state. Liquity-style.
-- **EMA reference** — deviation from exponentially-weighted moving average.
-- **TWAP reference** — deviation from a time-weighted average window.
-- **Sampled-window realized variance** — `σ̂² = (1/(N−1)) Σ r_i²`; trip at `|r|/√Δt > k·σ̂`. Most parameters.
+### State
 
-All are heuristics under real (fat-tailed, regime-switching) return distributions; threshold calibration is empirical per token. No on-chain breaker has overcome this. The *structural* guarantees below hold regardless of metric.
+Per breaker:
+- `history: [PriceReading]` — **accepted observations only**. Serves consumers via `history.last`.
+- `prevObservation: PriceReading?` — **most recent observation** (whether accepted or tripped). Used as the base for each tick's return computation.
+- `σ̂²` — running variance estimate.
 
-**Scheduler irregularity.** Implementations should not assume uniform spacing between observations. Metrics that operate on observed `publishTime` deltas absorb irregularity naturally; metrics that assume a uniform grid degrade in accuracy under irregularity but not in safety — stale observations age out via N3 regardless. The choice of approach follows from the chosen metric.
+### Per-tick update
+
+On each scheduled tick, observe `(pₖ, τₖ)` from upstream. Let `(pₚ, τₚ) = prevObservation` be the previous observation:
+
+```
+Δτₖ  =  τₖ  −  τₚ
+uₖ   =  log(pₖ / pₚ)  /  √Δτₖ                 (Δt-normalized log return, measured from previous observation)
+αₖ   =  1  −  exp(−Δτₖ / T)                    (time-adaptive smoothing; T = decay time constant)
+σ̂²ₖ  =  αₖ · uₖ²  +  (1 − αₖ) · σ̂²ₖ₋₁           (EMA variance update — always applied)
+
+Trip   =  |uₖ|  >  k · σ̂ₖ₋₁
+
+if not Trip:  append (pₖ, τₖ) to history       (cache advances, consumers see new value)
+always:       prevObservation = (pₖ, τₖ)       (measurement chain advances regardless of trip)
+```
+
+### What this separates
+
+- **`σ̂²`** is a pure function of the observed stream — updates every tick via `prevObservation` chain. Adapts to regime changes naturally through EMA.
+- **`history` (cache)** only advances on accepted observations — consumers see the last-known-good value; trip freezes it until staleness fires nil.
+- **`prevObservation`** is pure measurement state — tracks the raw stream independently of what's been served.
+
+Three concerns, three state variables, no overloading.
+
+Parameters (calibration open per asset, see Open Questions):
+- `T` — EMA decay time constant; matches the timescale over which the breaker adapts.
+- `k` — trip threshold in units of `σ̂`. Higher `k` → fewer false trips, more false negatives. Calibrated empirically per asset.
+
+Chosen because: handles irregular observation spacing natively (via Δt-normalization); O(1) state and O(1) compute per tick; volatility-adaptive (trip threshold scales with recent volatility rather than a fixed deviation bound); under the `Δ_max` source-spread bound (Source-time spread, above), bias is upward and bounded — breaker fails *safe* (less sensitive, not more).
+
+Alternative metrics remain open.
+
+All volatility heuristics share residual risk under real (fat-tailed, regime-switching) return distributions; threshold calibration is empirical per token. The *structural* guarantees below hold regardless of metric.
+
+**Scheduler irregularity.** Safety is preserved regardless of scheduler timing — stale observations age out via N3. The recommended default metric (below) is variable-grid and absorbs irregularity directly via Δt-normalization; alternative metrics must handle irregular spacing explicitly or accept inflated σ̂ as a false-negative risk.
+
+**Source-time spread.** Let tick `k` produce aggregate reading `(p⁽ᵏ⁾, τ⁽ᵏ⁾)` from N source observations `{(vᵢ⁽ᵏ⁾, tᵢ⁽ᵏ⁾)}` where:
+
+```
+p⁽ᵏ⁾  =  g({vᵢ⁽ᵏ⁾})                              (aggregation function — median / mean / etc.)
+τ⁽ᵏ⁾  =  minᵢ tᵢ⁽ᵏ⁾                              (conservative staleness bound — Invariant V)
+Δ⁽ᵏ⁾  =  maxᵢ tᵢ⁽ᵏ⁾  −  minᵢ tᵢ⁽ᵏ⁾   ≥  0        (intra-aggregate source-time spread)
+```
+
+The aggregate's value `p⁽ᵏ⁾` is computed from measurements taken over the interval `[τ⁽ᵏ⁾, τ⁽ᵏ⁾ + Δ⁽ᵏ⁾]` — it is *not* a point sample at `τ⁽ᵏ⁾`.
+
+Any deviation metric `D({(p⁽ᵏ⁾, τ⁽ᵏ⁾)}_k)` that treats the series as point samples inherits a bias term `ε({Δ⁽ᵏ⁾}_k)`:
+
+```
+D_observed  =  D_true  +  ε({Δ⁽ᵏ⁾})
+```
+
+`ε` is non-zero mean when spreads correlate with price direction (e.g., one source reliably publishes slower during volatile periods). Variance estimators in particular are *inflated* by this noise.
+
+**Required: the aggregator MUST enforce `Δ⁽ᵏ⁾ ≤ Δ_max`** and reject (nil) aggregations exceeding it. `Δ_max` is chosen so `ε` is dominated by signal in the regime of interest — concretely, small relative to the chosen metric's decay time (e.g., `Δ_max ≪ T` for the recommended EMA variance, so aggregate-blend bias is a small fraction of `σ̂²`).
+
+The recommended default metric (see Metric shape, below) is valid under this bound. Alternative metrics that are *intrinsically* spread-aware — modeling `p⁽ᵏ⁾` as a window average rather than a point sample, using time-density-normalized returns, etc. — could relax this bound but must define their `ε` explicitly, not hand-wave it.
 
 ### Invariants and timing bounds
 
@@ -425,7 +492,9 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 - **Staleness bound.** Implementation-defined per source type; must satisfy T-I for the breaker's cadence.
 - **Spread metric and threshold for N5.** To be calibrated against source-disagreement noise.
 - **Breaker scheduled-tx cadence (`δ_cadence`).** Must satisfy T-I and T-II. Default TBD.
-- **Breaker metric shape** (last-known-good / EMA / TWAP / sampled variance) and parameters. Empirical per token.
+- **Breaker EMA parameters** `T` (decay time constant) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
+- **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `T`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
+- **Exact mathematical formulas** for the breaker metric and aggregator remain open. The recommended defaults in this spec are a starting point; specific functional forms are subject to change during empirical calibration.
 
 ## Non-Goals
 
