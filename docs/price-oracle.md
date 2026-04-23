@@ -152,7 +152,7 @@ Each source datum carries an attested publish time (Pyth `publishTime`, BandOrac
 
 - **Query path** — any caller. `unitOfAccount()` is compile-time `view`. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-block repeats return the same value, and no side effect may alter a subsequent query's result.
 - **Scheduled-tx entitlement** — scoped to the circuit breaker's `CircuitBreaker.executeTransaction` (called by `FlowTransactionScheduler`). Not applicable to the aggregator (stateless). Not callable by public traffic.
-- **Deployment** — creating, wiring, and retiring oracles at the protocol layer is outside this interface. Deployed oracles are immutable (invariant I); any change requires redeploy.
+- **Deployment** — creating, wiring, and retiring oracles at the protocol layer is outside this interface. Deployed oracles are immutable (invariant I); any change requires recreation.
 
 ## Safety and Liveness
 
@@ -463,6 +463,7 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 - **Breaker EMA parameters** `T` (decay time constant) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
 - **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `T`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
 - **Exact mathematical formulas** for the breaker metric and aggregator remain open. The recommended defaults in this spec are a starting point; specific functional forms are subject to change during empirical calibration.
+- **Single-source failure policy.** At launch (N=2) the aggregator nils on any source failure — filtering to N=1 is indefensible. At mature (N≥3+ with median) we should shift to filter-and-quorum; MakerDAO Medianizer's `bar` parameter is the clearest precedent (minimum number of valid signed feeds required for a non-nil aggregate). Plan: bake in a minimum-quorum parameter now, set to `N` at launch, relax once we have enough sources for filtering to preserve Byzantine tolerance. Breaker does NOT trip on source failures — staleness pathway handles fail-closed.
 
 ## Non-Goals
 
