@@ -20,7 +20,7 @@ A minimal `PriceOracle` interface that:
 1. Exposes one honest read path: either a reliable price denominated in the oracle's declared unit of account (for FCM, the USD Numeraire), or `nil`.
 2. Accommodates multiple independent underlying price sources without leaking that composition to callers.
 3. Composes with later safety additions (notably a volatility circuit breaker) without interface change — layers *wrap* the oracle rather than modify it.
-4. Fails closed by construction: every documented failure path produces `nil` via a named invariant or nil condition. No documented path returns a wrong value under failure.
+4. No failures or panics by construction: every documented failure path produces `nil` via a specific invariant or nil condition. No documented path returns a wrong value under failure. Limits to the safety of the Oracle are clearly and exhaustively specified.
 
 ### Lifetime
 
@@ -28,22 +28,22 @@ The interface and the requirements on consumers (Caller Contract) are intended t
 
 ## Assumptions
 
-The spec takes the following as given. If any is violated, the conclusions below do not hold.
+The spec makes the following axiomatic assumptions. If any is violated, the conclusions below do not hold.
 
-- **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources — uncorrelated in their failure and manipulation modes. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
+- **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources — uncorrelated in their failure modes and vulnerability to manipulation. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
 - **Sources attest `publishTime` truthfully.** A source reports the wall-clock instant at which its value was observed, up to bounded skew. If sources lie about time, staleness checks (N3) are defeated.
-- **Majority-honest sources (Byzantine bound).** Across N sources, fewer than ⌈N/2⌉ are simultaneously compromised or stale. Required for median aggregation to be robust and for the spread check to be a useful signal.
+- **Majority-honest sources (Byzantine bound).** Across N sources, strictly fewer than half are simultaneously compromised or stale. Required for median aggregation to be robust and for the spread check to be a useful signal.
 
 ## Nomenclature
 
 | Term | Definition |
 | :--- | :--- |
 | **USD Numeraire** | A `FungibleToken` type representing USD for which no vault ever exists on-chain. Tokens like pyUSD, USDC, FUSD are *denominated in* the USD Numeraire. FCM prices everything in Numeraire units. |
-| **Unit of Account** (UoA) | The `FungibleToken` type in which prices returned by the oracle are denominated. A Cadence `Type`, not a string. For FCM, always the USD Numeraire. |
-| **Price Source** (or *source*) | An independent origin of pricing data — e.g., on-chain DEX pool, or a signed off-chain feed bridged onto Flow (Pyth, BandOracle). |
+| **Unit of Account** (UoA) | The `FungibleToken` type in which prices returned by the oracle are denominated. A Cadence `Type`, not a string. For FCM, always the Numeraire (tentatively USD) by convention. |
+| **Price Source** (or *source*) | A producer of pricing data — e.g., on-chain DEX pool, or a signed off-chain feed bridged onto Flow (Pyth, BandOracle). Caution: a `Price Source` might use units of account other than the numeraire for their returned prices. The trust model for price sources is: mostly reliable but not fully trusted. |
 | **Independent sources** | Sources whose failure or manipulation modes are uncorrelated. Two DEX pools fed by the same arbitrageur flow are NOT independent; a DEX and a signed off-chain feed ARE. |
 | **Staleness bound** | Maximum age of the newest datum a returned price depends on. Measured against source publish time (I7). |
-| **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Must satisfy T-I (`δ_cadence < stalenessBound`) and T-II (`historyWindow ≥ K · δ_cadence`). |
+| **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Must satisfy T.I (`δ_cadence < stalenessBound`) and T.II (`historyWindow ≥ K · δ_cadence`). |
 
 ## Interface
 
@@ -168,11 +168,11 @@ Sources publish new data; the scheduled update pokes on cadence; aggregator (or 
 
 ### Scenario II — transient failure (source nil, spread spike, breaker trip)
 
-A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B-IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value (still reliable at its publish time). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T-IV). If the failure persists beyond the bound, `price()` returns nil until resolution. No consumer ever observes a value that violated the trip condition at acceptance time.
+A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B.IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value (still reliable at its publish time). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T.IV). If the failure persists beyond the bound, `price()` returns nil until resolution. No consumer ever observes a value that violated the trip condition at acceptance time.
 
 ### Scenario III — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
 
-Scheduled tx stops running (scheduler stall, operator action, bug). `history.last.publishTime` does not advance. Once `now − history.last.publishTime > stalenessBound`, `price()` returns nil via N3 (B-V + T-I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (B-III + capability topology). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
+Scheduled tx stops running (scheduler stall, operator action, bug). `history.last.publishTime` does not advance. Once `now − history.last.publishTime > stalenessBound`, `price()` returns nil via N3 (B-V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (B.III + capability topology). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
 
 ### Scenario IV — warm-up
 
@@ -422,20 +422,20 @@ The recommended default metric (see Metric shape, below) is valid under this bou
 
 ### Invariants and timing bounds
 
-- **B-I Fail-closed on trip.** When a deviation check rejects an observation, breaker state is unchanged. Consumers continue to see the previously-accepted value until it ages past the staleness bound (N3). Trip signalling to off-chain monitoring is covered by I3.
-- **B-II Publish-time discipline.** Specialization of Invariant V: every observation recorded by the breaker carries a source-attested `publishTime`, never relabeled with pull-time, insertion-time, or `block.timestamp`.
-- **B-III Query idempotence.** Specialization of Invariant II / I5: consumer reads cannot mutate breaker state; state mutation is restricted to the scheduled-tick context. Same-block reads return the same value.
-- **B-IV Atomic per-tick update.** Each scheduled tick either commits its state transition — new observation, any pruning — in full, or commits nothing. No partial states.
+- **B.I Fail-closed on trip.** When a deviation check rejects an observation, breaker state is unchanged. Consumers continue to see the previously-accepted value until it ages past the staleness bound (N3). Trip signalling to off-chain monitoring is covered by I3.
+- **B.II Publish-time discipline.** Specialization of Invariant V: every observation recorded by the breaker carries a source-attested `publishTime`, never relabeled with pull-time, insertion-time, or `block.timestamp`.
+- **B.III Query idempotence.** Specialization of Invariant II / I5: consumer reads cannot mutate breaker state; state mutation is restricted to the scheduled-tick context. Same-block reads return the same value.
+- **B.IV Atomic per-tick update.** Each scheduled tick either commits its state transition — new observation, any pruning — in full, or commits nothing. No partial states.
 - **B-V History monotonic and window-bounded.** The internal observation log is strictly increasing in `publishTime`; retained entries lie within a configured window ending at the most recent observation.
 - **B-VI Per-observation bound.** For every observation served to consumers, the deviation check held at acceptance — `|log(p_curr / reference(history))| ≤ threshold`. Form of `reference` depends on metric; bound holds regardless.
 - **B-VII Immutable breaker config.** Extends Invariant I: breaker configuration — deviation threshold, history window, staleness bound, scheduled-tick cadence, aggregator source — is fixed at construction. Changing any requires redeployment.
 
 **Timing:**
 
-- **T-I** `δ_cadence < stalenessBound`. Otherwise `history.last` ages past the staleness bound between ticks even under nominal operation. Scheduler stalls cause N3 nil — fail-closed on outage.
-- **T-II** `historyWindow ≥ K · δ_cadence` for `K ≥ 2`. K = 2 is the structural floor — deviation is undefined with a single observation. Practical K is metric-dependent and open (see Metric shape).
-- **T-III Event-driven.** Trip evaluation only on publish-time advance; same-time pokes are no-ops.
-- **T-IV Automatic recovery.** No persistent "broken" flag. Next non-tripping observation appends to `history` and advances the served reading. Transient failures resolve automatically; structural compromise escalates to operator intervention (different from Liquity's persistent-break model).
+- **T.I** `δ_cadence < stalenessBound`. Otherwise `history.last` ages past the staleness bound between ticks even under nominal operation. Scheduler stalls cause N3 nil — fail-closed on outage.
+- **T.II** `historyWindow ≥ K · δ_cadence` for `K ≥ 2`. K = 2 is the structural floor — deviation is undefined with a single observation. Practical K is metric-dependent and open (see Metric shape).
+- **T.III Event-driven.** Trip evaluation only on publish-time advance; same-time pokes are no-ops.
+- **T.IV Automatic recovery.** No persistent "broken" flag. Next non-tripping observation appends to `history` and advances the served reading. Transient failures resolve automatically; structural compromise escalates to operator intervention (different from Liquity's persistent-break model).
 
 **Composite bound (end-to-end):** for every non-nil `p` returned at wall-clock `t` with source publish time `τ`:
 
@@ -457,9 +457,9 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 - **Single-source for initial deployment?** Protocol lead to decide. The spec accommodates either path.
 - **Catalog of acceptable source pairings** — which count as "independent" under I1, under what market assumptions. Research before mature launch.
 - **Aggregation function (median vs. mean).** Matters less at low N, more at higher N. Decide once source shortlist is concrete.
-- **Staleness bound.** Implementation-defined per source type; must satisfy T-I for the breaker's cadence.
+- **Staleness bound.** Implementation-defined per source type; must satisfy T.I for the breaker's cadence.
 - **Spread metric and threshold for N5.** To be calibrated against source-disagreement noise.
-- **Breaker scheduled-tx cadence (`δ_cadence`).** Must satisfy T-I and T-II. Default TBD.
+- **Breaker scheduled-tx cadence (`δ_cadence`).** Must satisfy T.I and T.II. Default TBD.
 - **Breaker EMA parameters** `T` (decay time constant) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
 - **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `T`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
 - **Exact mathematical formulas** for the breaker metric and aggregator remain open. The recommended defaults in this spec are a starting point; specific functional forms are subject to change during empirical calibration.
