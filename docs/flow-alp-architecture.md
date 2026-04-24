@@ -14,14 +14,14 @@ Every user-intent operation flows through four phases across three components. T
 Pool:
   1. PoolState.applyTimeBasedMutations()  — phase 1: time-based state update
   2. PoolState.<Mutator>(intent):
-       validate                           — phase 2: operation-level rule check
-       apply                              — phase 3: intent state change
-       checkInvariants                    — phase 4: universal post-state check
+       pre:  validateXxx → Bool           — phase 2: operation-level rule check
+       body: apply ledger / reserves      — phase 3: intent state change
+       post: invariantsHold → Bool        — phase 4: universal post-state check
 ```
 
 - **Orchestrator** — a method on `Pool`. Builds an `Intent`, calls `applyTimeBasedMutations` to bring state up to date, then invokes the Mutator. Enforces caller-level access control via entitlements.
-- **Validator** — a contract-level `view` function. Runs inside the Mutator against the time-advanced state; panics on any rule violation.
-- **Mutator** — an `access(all)` method on `PoolState`. Corresponds 1:1 with a Validator. Runs validate → apply → invariants; returns any output resources.
+- **Validator** — a contract-level `view` function returning `Bool`. Invoked from the Mutator's `pre` block against the time-advanced state; a `false` result aborts the operation before any state change.
+- **Mutator** — an `access(all)` method on `PoolState`. Corresponds 1:1 with a Validator. Validate (pre) → apply (body) → invariants (post); returns any output resources.
 
 `applyTimeBasedMutations` is a separate `PoolState` entry point that writes state but does not correspond to a Validator — it has no intent, it just advances time-dependent quantities (e.g. interest indices).
 
@@ -43,7 +43,7 @@ The set of code paths that can change protocol state should be small and explici
 
 **Goal 2: Uniformly enforce critical safety invariants after every operation.**
 
-Every Mutator's final action is `checkInvariants` — a `view` method that reads all state and panics on any violation. Because Cadence reverts the transaction on panic, a failed invariant undoes every change produced by the operation. Invariants are a transaction-level property: they must hold at the end of each operation, not between individual applier calls.
+Every Mutator declares `self.invariantsHold()` as its `post` condition — a `view` method that reads all state and returns `true` iff every invariant holds. A `false` result trips the post-condition, panicking and reverting the transaction. Invariants are a transaction-level property: they must hold at the end of each operation, not between individual applier calls.
 
 ### Orchestrator
 
@@ -67,10 +67,10 @@ Every intent-based Orchestrator calls `applyTimeBasedMutations` before invoking 
 Contract-level `view` functions of the form:
 
 ```cadence
-access(contract) view fun validateDeposit(state: &PoolState, intent: DepositIntent)
+access(contract) view fun validateDeposit(state: &PoolState, intent: DepositIntent): Bool
 ```
 
-A Validator runs inside the Mutator, after `applyTimeBasedMutations`. It reads state through an un-entitled `&PoolState` (and any needed Pool config), checks operation-level rules, and panics on violation. The `view` modifier is the central enforcement mechanism: Cadence rejects any mutation inside a view function at compile time.
+A Validator is invoked from the Mutator's `pre` block and runs after `applyTimeBasedMutations`. It reads state through an un-entitled `&PoolState` (and any needed Pool config), checks operation-level rules, and returns `true` iff every rule passes. A `false` result aborts the Mutator before its body runs. The `view` modifier is the central enforcement mechanism: Cadence rejects any mutation inside a view function at compile time.
 
 **What belongs in a Validator.** A check is the Validator's responsibility if at least one of the following is true:
 
@@ -81,22 +81,33 @@ A Validator runs inside the Mutator, after `applyTimeBasedMutations`. It reads s
 
 ### Mutator
 
-`access(all)` methods on `PoolState` that form the API surface exposed to the Orchestrator for intent-based operations. The Orchestrator has already called `applyTimeBasedMutations` by the time a Mutator is invoked. The Mutator runs three phases:
+`access(all)` methods on `PoolState` that form the API surface exposed to the Orchestrator for intent-based operations. The Orchestrator has already called `applyTimeBasedMutations` by the time a Mutator is invoked. Each Mutator's three phases (validate, apply, invariants) are expressed in Cadence's pre/body/post structure:
 
 ```cadence
-access(all) fun deposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
-    FlowALP.validateDeposit(state: &self as &PoolState, intent: intent)  // validate
-    self.applyDeposit(intent: intent, vault: <- vault)                   // apply + invariants
+access(all) fun applyDeposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
+    pre {
+        FlowALP.validateDeposit(state: &self as &PoolState, intent: intent):
+            "deposit validation failed"
+        vault.getType() == intent.tokenType:
+            "vault type does not match intent"
+        vault.balance == intent.amount:
+            "vault amount does not match intent"
+    }
+    post {
+        self.invariantsHold(): "post-state invariants violated"
+    }
+    self.applyVaultDeposit(from: <- vault)
+    self.applyLedgerDelta(/* ... */)
 }
 ```
 
-- **Validate** — call the matching contract-level `view` Validator (pre-condition)
-- **Apply** — an internal `access(self)` helper (`applyDeposit`, `applyWithdraw`, ...) invokes one or more appliers — `access(self)` primitives on `PoolState` (`applyLedgerDelta`, `applyVaultDeposit`, `applyReserveWithdraw`). Mutators carry preconditions that cross-check input resources against the intent (e.g. the deposit path asserts that the incoming vault's type and balance match `DepositIntent`'s declared values — the Validator only saw the intent, not the vault).
-- **Invariants** — the apply helper ends with `self.checkInvariants()` (post-condition)
+- **Validate (pre)** — call the matching contract-level `view` Validator. Cross-checks that need the input resource (e.g. "incoming vault's type and balance match the intent" — the Validator only saw the intent, not the vault) stay inline in the same `pre` block.
+- **Apply (body)** — invoke one or more appliers — `access(self)` primitives on `PoolState` (`applyLedgerDelta`, `applyVaultDeposit`, `applyReserveWithdraw`).
+- **Invariants (post)** — call `self.invariantsHold()`.
 
 ### Invariants
 
-`checkInvariants` is a `view` method on `PoolState`, invoked as the Mutator's final phase. It reads the full state and panics on any violation, reverting the transaction.
+`invariantsHold` is an `access(self) view` method on `PoolState`, invoked as the Mutator's `post` condition. It reads the full state and returns `true` iff every invariant holds. A `false` result trips the post-condition, panicking and reverting the transaction.
 
 **What belongs in Invariants.** An invariant is a universal property of state that must hold after *every* operation, regardless of which operation ran. Invariants catch bugs in any code path, giving defense-in-depth beyond per-operation validation.
 
@@ -114,8 +125,8 @@ A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested o
 
 - Every method on `Pool` is either `view` or entitlement-gated. No `access(all)` non-view methods on `Pool`; no `access(contract)` non-view methods on `Pool`.
 - State-writing methods on `PoolState` are either:
-  - `access(all)` entry points (`applyTimeBasedMutations`, the intent Mutators, `registerPosition`, `registerToken`), invoked only through `Pool`'s orchestrators, OR
-  - `access(self)` internals (apply helpers, appliers, `checkInvariants`), invoked only from within `PoolState`.
+  - `access(all)` Mutators / entry points (`applyTimeBasedMutations`, `applyDeposit`, `applyWithdraw`, `registerPosition`, `registerToken`), invoked only through `Pool`'s orchestrators, OR
+  - `access(self)` internals (appliers and `invariantsHold`), invoked only from within `PoolState`.
 - `PoolState` is an `access(self)` field of `Pool`, so no external reference to `PoolState` ever escapes.
 
 The first rule is lint-checkable and enumerates `Pool`'s external surface by entitlement. The second and third are compiler-enforced: Cadence emits an `access denied` error on any attempt to reach a `PoolState` internal writer from outside `PoolState`, and no code outside `Pool` can obtain an `&PoolState` reference at all. External callability of the `access(all)` entry points is bounded by that last property.
