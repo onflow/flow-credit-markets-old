@@ -112,14 +112,13 @@ access(all) fun applyDeposit(intent: DepositIntent, vault: @{FungibleToken.Vault
 **What belongs in Invariants.** An invariant is a universal property of state that must hold after *every* operation, regardless of which operation ran. Invariants catch bugs in any code path, giving defense-in-depth beyond per-operation validation.
 
 - **Accounting integrity**: for each supported token T, Σ(position credits for T) − Σ(position debits for T) = Reserves balance for T. (obviously this would be more complicated with interest and fees)
-- **Solvency**: the action did not decre
 - **Pool-wide caps**: total borrowed per token ≤ pool cap for that token.
 
 **Rule of thumb.** If a check is expressible as a post-state property that must hold after *any* operation, it belongs in Invariants. Otherwise, it belongs in the Validator. Where a check is expressible either way (e.g. "this position's HF ≥ 1 after a withdrawal"), prefer Invariants — the single universal check covers every future operation without being restated.
 
 ### Intent
 
-A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested operation. Intents carry no resources; input resources are passed as separate arguments and cross-checked inside the Mutator. Intents mirror user actions 1:1 and 
+A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested operation. Intents carry no resources; input resources are passed as separate arguments and cross-checked inside the Mutator. Intents mirror user actions 1:1, and primarily exist to encapsulate data associated with a user action through the pipeline.
 
 ### Access-control convention
 
