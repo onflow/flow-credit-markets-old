@@ -167,11 +167,6 @@ access(all) contract FlowALP {
             self.balances = {}
         }
 
-        access(all) view fun getBalance(tokenType: Type): SignedAmount {
-            return self.balances[tokenType]
-                ?? SignedAmount(direction: BalanceDirection.Credit, quantity: 0.0)
-        }
-
         /// Compose a delta into the current balance for the given token.
         /// Called only by `PoolState.applyLedgerDelta` (access(self) on PoolState).
         access(contract) fun applyDelta(tokenType: Type, delta: SignedAmount) {
@@ -230,11 +225,6 @@ access(all) contract FlowALP {
                 return vaultRef.balance
             }
             return 0.0
-        }
-
-        /// Returns the set of supported tokens. Output list has no guaranteed order.
-        access(all) view fun getSupportedTokens(): [Type] {
-            return self.vaults.keys
         }
 
         /// Returns true if the given token is supported.
@@ -323,20 +313,6 @@ access(all) contract FlowALP {
         }
 
         /* ----- Reads ----- */
-
-        access(all) view fun getReserveBalance(tokenType: Type): UFix64 {
-            return self.reserves.getBalance(tokenType: tokenType)
-        }
-
-        access(all) view fun getSupportedTokens(): [Type] {
-            return self.reserves.getSupportedTokens()
-        }
-
-        access(all) view fun getPositionBalance(positionID: UInt64, tokenType: Type): SignedAmount {
-            let record = self.positions[positionID]
-                ?? panic("unknown position")
-            return record.getBalance(tokenType: tokenType)
-        }
 
         access(all) view fun hasPosition(positionID: UInt64): Bool {
             return self.positions[positionID] != nil
@@ -488,16 +464,6 @@ access(all) contract FlowALP {
                 cap.check(): "pool capability must be valid"
             }
             self.selfCap = cap
-        }
-
-        /* ----- Public reads (delegate to PoolState) ----- */
-
-        access(all) view fun getReserveBalance(tokenType: Type): UFix64 {
-            return self.state.getReserveBalance(tokenType: tokenType)
-        }
-
-        access(all) view fun getSupportedTokens(): [Type] {
-            return self.state.getSupportedTokens()
         }
 
         /* ----- Participant / Admin / Liquidate operations ----- */
