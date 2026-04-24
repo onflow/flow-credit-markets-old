@@ -5,14 +5,13 @@ import "FungibleToken"
 /// OVERVIEW
 /// The Pool resource is the protocol's public API and access-control layer. It
 /// holds configuration, issues Position resources, and orchestrates operations
-/// (deposit, withdraw, liquidate). It does NOT hold mutable protocol state
-/// directly; that state lives inside a nested PoolState resource.
+/// (deposit, withdraw, liquidate). It delegates all state mutations (including
+/// token movemements) to PoolState.
 ///
 /// PoolState is the protocol's state machine. It owns all mutable state —
 /// position records, per-token state, and custody (Reserves) — and exposes a
 /// narrow, intent-shaped write surface. Every path that mutates protocol state
-/// flows through a PoolState method. Pool has no state-writing methods of its
-/// own; its job is to build intents and forward them to PoolState.
+/// flows through a PoolState method.
 ///
 /// To interact with FlowALP, users create a Position. This causes a
 /// PositionRecord to be stored in PoolState, and returns a Position resource to
@@ -29,8 +28,6 @@ import "FungibleToken"
 ///    entry points on PoolState (`deposit`, `withdraw`, `registerPosition`,
 ///    `registerToken`) are `access(all)` and internally invoke an `access(self)`
 ///    mutator method which applies state changes and calls `checkInvariants`.
-///    Grep `access(self) fun` inside PoolState to enumerate every writer — the
-///    compiler guarantees nothing outside PoolState can invoke them.
 ///
 /// DESIGN: Orchestrator / Intent / PoolState pipeline
 /// Every operation is structured as:
