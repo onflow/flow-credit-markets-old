@@ -83,6 +83,9 @@ access(all) contract FlowALP {
         init(
             tokenType: Type,
         ) {
+            pre {
+                tokenType.isSubtype(of: Type<@{FungibleToken.Vault}>()): "tokenType must be a FungibleToken.Vault subtype"                                                                  
+            }
             self.tokenType = tokenType
         }
     }
@@ -178,6 +181,10 @@ access(all) contract FlowALP {
         init(
             numeraire: Type,
         ) {
+            pre {
+                // TODO: if numeraire has more distinct interface than FungibleToken, adjust accordingly here
+                numeraire.isSubtype(of: Type<@{FungibleToken.Vault}>()): "numeraire must be a FungibleToken.Vault subtype"                                                                  
+            }
             self.numeraire = numeraire
             self.paused = false
         }
@@ -197,6 +204,8 @@ access(all) contract FlowALP {
         access(self) let positions: {UInt64: PositionRecord}
         /// Entitled self-capability copied into each Position. Must be set
         /// by Admin after the Pool is stored. openPosition() panics until set.
+        /// This capability is passed to Position resources created by this Pool,
+        /// and allows those Positions to interact with Pool state.
         access(self) var selfCap: Capability<auth(Internal) &Pool>?
 
         init(config: PoolConfig) {
