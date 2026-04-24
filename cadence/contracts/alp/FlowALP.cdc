@@ -124,7 +124,7 @@ access(all) contract FlowALP {
 
         /// Register a new supported token. Caller supplies an empty vault
         /// of the correct type to establish custody. Fails if already
-        /// supported.
+        /// supported, or vault is not empty
         access(contract) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
             pre {
                 emptyVault.balance == 0.0: "initial vault must be empty"
