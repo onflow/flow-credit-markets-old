@@ -3,22 +3,50 @@ import "FungibleToken"
 /// FlowALP (Automated Lending Protocol)
 ///
 /// OVERVIEW
-/// The Pool resource is the core container of state and logic for FlowALP. It holds deposits,
-/// maintains position and ledger state, and provides core functionality.
+/// The Pool resource is the protocol's public API and access-control layer. It
+/// holds configuration, issues Position resources, and orchestrates operations
+/// (deposit, withdraw, liquidate). It delegates all state mutations (including
+/// token movemements) to PoolState.
 ///
-/// To interact with FlowALP, users create a Position. This causes a PositionRecord to be stored in the Pool,
-/// and returns a Position resource to the user. The Position resource represents authorization to interact with the position,
-/// for example withdrawing/depositing funds.
+/// PoolState is the protocol's state machine. It owns all mutable state —
+/// position records, per-token state, and custody (Reserves) — and exposes a
+/// narrow, intent-shaped write surface. Every path that mutates protocol state
+/// flows through a PoolState method.
 ///
-/// The Pool supports a limited set of tokens. Each supported token has associated information, which
-/// is tracked with the TokenStateRecord type. Tokens are identified by their Type.
-///
-/// The Reserves resource holds all funds and manage deposits and withdrawals.
+/// To interact with FlowALP, users create a Position. This causes a
+/// PositionRecord to be stored in PoolState, and returns a Position resource to
+/// the user. The Position resource represents authorization to interact with
+/// the position (deposit/withdraw).
 ///
 /// MODEL CONVENTIONS
-/// 1. Types which are primarily used to persist data in storage are named ".*Record".
+/// 1. Types primarily used to persist data in storage are named ".*Record".
 ///    Record types are mutated only by their own methods: fields are access(self),
 ///    mutators are access(contract) (or narrower).
+/// 2. Every method on Pool is either `view` or entitlement-gated. No method on
+///    Pool is `access(all)` non-view. (Lint-checkable convention.)
+/// 3. PoolState exposes `access(all)` Mutators (`deposit`, `withdraw`,
+///    `registerPosition`, `registerToken`) for Pool to call. Each Mutator
+///    expresses its operation-level rules as `pre` conditions and the universal
+///    invariant check as a `post` condition. Low-level appliers
+///    (`applyLedgerDelta`, `applyVaultDeposit`, `applyReserveWithdraw`) and
+///    `invariantsHold` are `access(self)` and reachable only from inside PoolState.
+///
+/// DESIGN: Orchestrator / Mutator pipeline
+/// Every operation is structured as:
+///
+///     Pool.someOp:         Internal/Admin/... entitled orchestrator. Forwards
+///                          caller arguments to the matching Mutator on PoolState.
+///
+///     PoolState.<Mutator>: access(all) method (e.g. `deposit`, `withdraw`).
+///                          `pre` block validates inputs and operation-level
+///                          rules; body invokes appliers; `post` block calls
+///                          `self.invariantsHold()` to verify universal
+///                          invariants.
+///
+/// Resource I/O.
+/// Resources flow as direct arguments and return values: input resources are
+/// passed alongside the primitive arguments; output resources are returned
+/// directly by the Mutator.
 ///
 access(all) contract FlowALP {
 
@@ -80,9 +108,7 @@ access(all) contract FlowALP {
         access(self) var tokenType: Type
         // TODO: total credit/debit balance, borrow/collateral factors, interest indices will live here
 
-        init(
-            tokenType: Type,
-        ) {
+        init(tokenType: Type) {
             self.tokenType = tokenType
         }
     }
@@ -91,12 +117,12 @@ access(all) contract FlowALP {
 
     /// PositionRecord
     ///
-    /// Holds all persisted state related to a particular Position.
-    /// Positions are uniquely identified by their ID, which is the UUID of the Position resource
+    /// Holds all persisted state related to a particular Position. Positions are
+    /// uniquely identified by their ID, which is the UUID of the Position resource
     /// granted when the position is opened.
     access(all) struct PositionRecord {
-        /// Mirror of the Position resource's UUID; same value the Pool uses as dict.
-        /// TODO: This field is copied here to enable this struct to be fully self-describing: remove if this property is not needed.
+        /// Mirror of the Position resource's UUID; same value PoolState uses as dict key.
+        /// TODO: verify this field is needed; remove if not.
         access(all) let id: UInt64
 
         /// Set of credit and debit balances associated with this position.
@@ -107,6 +133,15 @@ access(all) contract FlowALP {
             self.id = id
             self.balances = {}
         }
+
+        /// Compose a delta into the current balance for the given token.
+        /// Called only by `PoolState.applyLedgerDelta` (access(self) on PoolState).
+        access(contract) fun applyDelta(tokenType: Type, delta: SignedAmount) {
+            // TODO: sum `delta` into `balances[tokenType]`, handling
+            // direction flips (e.g. a Credit+Debit that crosses zero).
+            let _t = tokenType
+            let _d = delta
+        }
     }
 
     /* ---------- Reserves ---------- */
@@ -114,7 +149,9 @@ access(all) contract FlowALP {
     /// Reserves
     ///
     /// Custody component that owns the FungibleToken vaults backing the Pool.
-    /// All token movements performed by the Pool are mediated by Reserves.
+    /// Held by PoolState; callers outside PoolState never reach Reserves
+    /// directly. Mutating methods are `access(contract)` — only PoolState's
+    /// own `access(self)` appliers call them.
     access(all) resource Reserves {
         access(self) var vaults: @{Type: {FungibleToken.Vault}}
 
@@ -123,8 +160,7 @@ access(all) contract FlowALP {
         }
 
         /// Register a new supported token. Caller supplies an empty vault
-        /// of the correct type to establish custody. Fails if already
-        /// supported.
+        /// of the correct type to establish custody. Fails if already supported.
         access(contract) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
             pre {
                 emptyVault.balance == 0.0: "initial vault must be empty"
@@ -142,8 +178,7 @@ access(all) contract FlowALP {
             vaultRef.deposit(from: <-from)
         }
 
-        /// Withdraw from the appropriate vault. Fails if unsupported or
-        /// insufficient balance.
+        /// Withdraw from the appropriate vault. Fails if unsupported or insufficient balance.
         access(contract) fun withdraw(tokenType: Type, amount: UFix64): @{FungibleToken.Vault} {
             let vaultRef = (&self.vaults[tokenType] as auth(FungibleToken.Withdraw) &{FungibleToken.Vault}?)
                 ?? panic("unsupported token type")
@@ -175,35 +210,192 @@ access(all) contract FlowALP {
         /// When paused, the pool rejects deposits, withdrawals, and liquidations.
         access(self) var paused: Bool
 
-        init(
-            numeraire: Type,
-        ) {
+        init(numeraire: Type) {
             self.numeraire = numeraire
             self.paused = false
         }
     }
 
-    /// Pool
+    /* ---------- PoolState ---------- */
+
+    /// PoolState
     ///
-    /// The Pool is the top-level container implementing the FlowALP protocol.
-    /// It orchestrates per-token accounting, per-position records, and custody (reserves). 
-    access(all) resource Pool {
-        access(self) let config: PoolConfig
-        /// Tracks global accounting information for each supported token.
-        access(self) let tokenStates: {Type: TokenStateRecord}
-        /// Custody — owns the FungibleToken vaults. See Reserves.
-        access(self) let reserves: @Reserves
+    /// The protocol's mutable state: per-position ledgers, per-token state, and
+    /// custody (Reserves). PoolState exposes two layers:
+    ///
+    ///   - `access(all)` Mutator entry points (`deposit`, `withdraw`,
+    ///     `registerPosition`, `registerToken`): the public API. Validation rules
+    ///     are expressed as `pre` conditions and universal invariants as
+    ///     `post` conditions. Each Mutator is invoked directly by Pool's
+    ///     orchestrators.
+    ///
+    ///   - `access(self)` low-level appliers (`applyLedgerDelta`,
+    ///     `applyVaultDeposit`, `applyReserveWithdraw`) and the invariant
+    ///     check (`invariantsHold`). The compiler guarantees nothing outside
+    ///     PoolState can invoke them.
+    ///
+    /// Grep `access(self) fun` inside PoolState to enumerate every internal writer.
+    access(all) resource PoolState {
         /// Positions keyed by the Position resource's UUID.
         access(self) let positions: {UInt64: PositionRecord}
+        /// Per-token accounting information.
+        access(self) let tokenStates: {Type: TokenStateRecord}
+        /// Custody — owns the FungibleToken vaults.
+        access(self) let reserves: @Reserves
+
+        init() {
+            self.positions = {}
+            self.tokenStates = {}
+            self.reserves <- create Reserves()
+        }
+
+        /* ----- Reads ----- */
+
+        access(all) view fun hasPosition(positionID: UInt64): Bool {
+            return self.positions[positionID] != nil
+        }
+
+        access(all) view fun isSupportedToken(tokenType: Type): Bool {
+            return self.reserves.isSupported(tokenType: tokenType)
+        }
+
+        /* ----- Mutators (access(all) entry points) -----
+         *
+         * Each Mutator's `pre` block is its Validator: operation-level rules
+         * checked against the time-advanced state. Each Mutator's `post` block
+         * is the invariant check: universal post-state properties that must
+         * hold regardless of which Mutator ran. Both panic on violation,
+         * reverting the transaction.
+         */
+
+        /// Apply a deposit. Moves the vault into Reserves and credits the position ledger.
+        /// The vault itself supplies tokenType and amount.
+        access(all) fun deposit(positionID: UInt64, vault: @{FungibleToken.Vault}) {
+            pre {
+                vault.balance > 0.0: "amount must be positive"
+                self.isSupportedToken(tokenType: vault.getType()): "token type not supported"
+                self.hasPosition(positionID: positionID): "unknown position"
+                // TODO: per-token deposit cap, paused state
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
+            }
+            let tokenType = vault.getType()
+            let amount = vault.balance
+            self.applyVaultDeposit(from: <- vault)
+            self.applyLedgerDelta(
+                positionID: positionID,
+                tokenType: tokenType,
+                delta: SignedAmount(direction: BalanceDirection.Credit, quantity: amount),
+            )
+        }
+
+        /// Apply a withdrawal. Debits the position ledger, withdraws the
+        /// vault from Reserves, and returns it.
+        access(all) fun withdraw(
+            positionID: UInt64,
+            tokenType: Type,
+            amount: UFix64,
+        ): @{FungibleToken.Vault} {
+            pre {
+                amount > 0.0: "amount must be positive"
+                self.isSupportedToken(tokenType: tokenType): "token type not supported"
+                self.hasPosition(positionID: positionID): "unknown position"
+                // TODO: post-op health factor ≥ 1, per-token withdraw / borrow caps, paused state
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
+            }
+            self.applyLedgerDelta(
+                positionID: positionID,
+                tokenType: tokenType,
+                delta: SignedAmount(direction: BalanceDirection.Debit, quantity: amount),
+            )
+            return <- self.applyReserveWithdraw(tokenType: tokenType, amount: amount)
+        }
+
+        /// Register a new position. Called by Pool.openPosition.
+        access(all) fun registerPosition(id: UInt64) {
+            pre {
+                !self.hasPosition(positionID: id): "position already exists"
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
+            }
+            self.positions[id] = PositionRecord(id: id)
+        }
+
+        /// Register support for a new token. Called by Pool's admin handler.
+        access(all) fun registerToken(emptyVault: @{FungibleToken.Vault}) {
+            let tokenType = emptyVault.getType()
+            self.tokenStates[tokenType] = TokenStateRecord(tokenType: tokenType)
+            self.reserves.addSupportedToken(emptyVault: <- emptyVault)
+        }
+
+        /* ----- Low-level appliers (access(self)) -----
+         *
+         * Single-purpose primitive writers, called only by Mutators.
+         * `access(self)` guarantees nothing outside PoolState can invoke them.
+         */
+
+        /// Composes `delta` into the balance of `tokenType` for the given position.
+        access(self) fun applyLedgerDelta(
+            positionID: UInt64,
+            tokenType: Type,
+            delta: SignedAmount,
+        ) {
+            let record = self.positions[positionID]
+                ?? panic("unknown position")
+            record.applyDelta(tokenType: tokenType, delta: delta)
+            self.positions[positionID] = record
+        }
+
+        /// Moves `from` into Reserves.
+        access(self) fun applyVaultDeposit(from: @{FungibleToken.Vault}) {
+            self.reserves.deposit(from: <- from)
+        }
+
+        /// Withdraws a vault from Reserves.
+        access(self) fun applyReserveWithdraw(
+            tokenType: Type,
+            amount: UFix64,
+        ): @{FungibleToken.Vault} {
+            return <- self.reserves.withdraw(tokenType: tokenType, amount: amount)
+        }
+
+        /// Universal post-state invariant check. Returns true iff every
+        /// invariant holds. Invoked as the `post` condition on every Mutator.
+        /// Marked `view` so the compiler enforces it cannot mutate.
+        ///
+        /// TODO: implement
+        ///   - for each supported token T:
+        ///       Σ(position credits for T) − Σ(position debits for T) == reserves.getBalance(T)
+        ///   - for each position P:
+        ///       healthFactor(P) ≥ 1  (unless P is flagged for liquidation)
+        ///   - pool-level caps respected
+        access(self) view fun invariantsHold(): Bool {
+            return true
+        }
+    }
+
+    /* ---------- Pool ---------- */
+
+    /// Pool
+    ///
+    /// Top-level protocol resource. Owns config, lifecycle, access control, and
+    /// the nested PoolState. Pool never writes protocol state itself — it
+    /// builds intents and calls into PoolState's entry points.
+    access(all) resource Pool {
+        access(self) let config: PoolConfig
+        /// Mutable protocol state. See PoolState.
+        access(self) let state: @PoolState
         /// Entitled self-capability copied into each Position. Must be set
         /// by Admin after the Pool is stored. openPosition() panics until set.
         access(self) var selfCap: Capability<auth(Internal) &Pool>?
 
         init(config: PoolConfig) {
             self.config = config
-            self.tokenStates = {}
-            self.reserves <- create Reserves()
-            self.positions = {}
+            self.state <- create PoolState()
             self.selfCap = nil
         }
 
@@ -216,62 +408,55 @@ access(all) contract FlowALP {
             self.selfCap = cap
         }
 
-        access(all) view fun getReserveBalance(tokenType: Type): UFix64 {
-            return self.reserves.getBalance(tokenType: tokenType)
-        }
+        /* ----- Participant / Admin / Liquidate operations ----- */
 
-        /// Mint a new position and return the owner's handle resource. The
-        /// Position's UUID (assigned by Cadence at creation) is the key
-        /// under which its PositionRecord is stored in the pool.
+        /// Mint a new position and return the owner's handle resource.
         access(Participant) fun openPosition(): @Position {
             let cap = self.selfCap ?? panic("pool self-capability not configured")
             let position <- create Position(poolCap: cap)
-            self.positions[position.uuid] = PositionRecord(id: position.uuid)
+            self.state.registerPosition(id: position.uuid)
             return <- position
         }
 
-        /// Internal deposit method that may only be invoked by a Position resource.
-        /// Access control is implemented by:
-        ///  1. the Position resource implementation binds its UUID to all pool operations.
-        ///  2. Internal-entitled Pool references are only distributed to internal components.
-        /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
-        /// TODO: Detailed documentation and invariants
-        access(Internal) fun internalDeposit(positionUUID: UInt64, from: @{FungibleToken.Vault}) {
-            pre {
-                self.reserves.isSupported(tokenType: from.getType())
-            }
-            let _pid = positionUUID
-            destroy from // placeholder — real impl routes to the reserve vault
+        /// Admin: register a new supported token by supplying an empty vault
+        /// of that type.
+        access(Admin) fun addSupportedToken(emptyVault: @{FungibleToken.Vault}) {
+            self.state.registerToken(emptyVault: <- emptyVault)
         }
 
-        /// Internal withdraw invoked by a Position. See internalDeposit.
+        /* ----- Internal orchestrators invoked by Position ----- */
+
+        /// Orchestrator: forwards a deposit to PoolState.
+        /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
+        access(Internal) fun internalDeposit(positionUUID: UInt64, from: @{FungibleToken.Vault}) {
+            self.state.deposit(positionID: positionUUID, vault: <- from)
+        }
+
+        /// Orchestrator: forwards a withdrawal to PoolState.
         /// TODO: consider splitting withdraw collateral vs borrow debt into distinct methods.
-        /// TODO: Detailed documentation and invariants
         access(Internal) fun internalWithdraw(
             positionUUID: UInt64,
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
-            pre {
-                self.reserves.isSupported(tokenType: tokenType)
-            }
-            let _pid = positionUUID
-            let _token = tokenType
-            let _amt = amount
-            panic("not implemented")
+            return <- self.state.withdraw(
+                positionID: positionUUID,
+                tokenType: tokenType,
+                amount: amount,
+            )
         }
 
         /// Manually liquidate an unhealthy position.
-        /// TODO: detailed documentation
+        /// TODO: implement via the orchestrator pattern. Introduce a
+        /// LiquidationIntent covering both borrower and liquidator sides; a
+        /// `view` validateLiquidate enforces health-factor + close-factor rules;
+        /// applyLiquidate consumes the repay vault, applies ledger changes,
+        /// withdraws the seized vault, checks invariants, and returns it.
         access(Admin | Liquidate) fun liquidate(
             positionUUID: UInt64,
             repay: @{FungibleToken.Vault},
             seizeType: Type, /* will need more params here */
         ): @{FungibleToken.Vault} {
-            pre {
-                self.reserves.isSupported(tokenType: repay.getType())
-                self.reserves.isSupported(tokenType: seizeType)
-            }
             let _pid = positionUUID
             let _seize = seizeType
             destroy repay
@@ -284,14 +469,14 @@ access(all) contract FlowALP {
     /// Position
     ///
     /// The user-held handle for a position. Its Cadence-assigned `uuid` is
-    /// the key under which the Pool stores the corresponding PositionRecord.
-    /// The resource itself stores no funds; all custody lives in the Pool.
+    /// the key under which PoolState stores the corresponding PositionRecord.
+    /// The resource itself stores no funds; all custody lives in PoolState.
     ///
-    /// Position holds a private, entitled capability to the Pool and exposes
-    /// operation methods (deposit, withdraw) that forward to the Pool's
+    /// Position holds a private, entitled capability to Pool and exposes
+    /// operation methods (deposit, withdraw) that forward to Pool's
     /// Internal-gated methods, binding `self.uuid` into each call.
     access(all) resource Position {
-        /// Permissioned reference to the Pool which created this Position's.
+        /// Permissioned reference to the Pool which created this Position.
         /// CAUTION: This reference must never be exposed outside this Position.
         access(self) let poolCap: Capability<auth(Internal) &Pool>
 
