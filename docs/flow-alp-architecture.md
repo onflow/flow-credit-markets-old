@@ -33,8 +33,8 @@ Pool:
 
 The set of code paths that can change protocol state should be small and explicit. This is achieved through three sub-constraints:
 
-- **1a. Validation runs in `view` context.** Every Validator is declared `view`, which Cadence checks at compile time. Business-rule code provably cannot mutate state.
-- **1b. State is encapsulated by type.** All mutable protocol state lives inside a dedicated `PoolState` resource, not on `Pool`. Within `PoolState`, substates are further nested in types that enforce their own rules (e.g. `Reserves` owns the FungibleToken vaults and rejects unsupported-token operations). Each layer owns a narrower slice of state and a correspondingly narrower set of rules.
+- **1a. Validation runs in `view` context.** Every Validator is declared `view`, which Cadence checks at compile time. Business-rule code provably cannot mutate state. The main reason for this is to **discourage mixing state validations with state mutations**.
+- **1b. State is encapsulated by type.** All mutable protocol state lives inside a dedicated `PoolState` resource, not on `Pool`. Within `PoolState`, substates are further nested in types that enforce their own rules.
 - **1c. Mutators are separated from appliers.** The state-writing API is two layers:
   - **Mutators** are the intent operations exposed to the Orchestrator: one per supported operation. Each Mutator corresponds to exactly one Validator.
   - **Appliers** are single-purpose primitive writers (add a delta to a balance, move a vault into Reserves, advance an interest index, ...). Only Mutators and `applyTimeBasedMutations` call appliers.
@@ -53,8 +53,6 @@ Methods on `Pool` that:
 3. Invoke the matching Mutator on `PoolState` with the intent (and any input resources).
 
 Each Orchestrator is entitlement-gated: `access(Internal)` for user operations routed through a `Position` handle, `access(Admin)` for protocol management, `access(Admin | Liquidate)` for liquidation. Orchestrators carry no business logic; their job is to shape inputs, advance state to the current block, and forward to the Mutator.
-
-Placing the `applyTimeBasedMutations` call at the Orchestrator level — rather than inside the Mutator — makes the time-advance-then-act sequence visible at the dispatch site and keeps the Mutator's responsibility narrow (intent handling only). It also lets admin operations that do not depend on time-advanced state skip this step.
 
 ### Time-based mutations
 
@@ -92,9 +90,9 @@ access(all) fun deposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
 }
 ```
 
-- **Validate** — call the matching contract-level `view` Validator.
+- **Validate** — call the matching contract-level `view` Validator (pre-condition)
 - **Apply** — an internal `access(self)` helper (`applyDeposit`, `applyWithdraw`, ...) invokes one or more appliers — `access(self)` primitives on `PoolState` (`applyLedgerDelta`, `applyVaultDeposit`, `applyReserveWithdraw`). Mutators carry preconditions that cross-check input resources against the intent (e.g. the deposit path asserts that the incoming vault's type and balance match `DepositIntent`'s declared values — the Validator only saw the intent, not the vault).
-- **Invariants** — the apply helper ends with `self.checkInvariants()`.
+- **Invariants** — the apply helper ends with `self.checkInvariants()` (post-condition)
 
 ### Invariants
 
@@ -102,15 +100,15 @@ access(all) fun deposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
 
 **What belongs in Invariants.** An invariant is a universal property of state that must hold after *every* operation, regardless of which operation ran. Invariants catch bugs in any code path, giving defense-in-depth beyond per-operation validation.
 
-- **Accounting integrity**: for each supported token T, Σ(position credits for T) − Σ(position debits for T) = Reserves balance for T.
-- **Solvency**: every position has health factor ≥ 1, unless flagged for liquidation.
+- **Accounting integrity**: for each supported token T, Σ(position credits for T) − Σ(position debits for T) = Reserves balance for T. (obviously this would be more complicated with interest and fees)
+- **Solvency**: the action did not decre
 - **Pool-wide caps**: total borrowed per token ≤ pool cap for that token.
 
 **Rule of thumb.** If a check is expressible as a post-state property that must hold after *any* operation, it belongs in Invariants. Otherwise, it belongs in the Validator. Where a check is expressible either way (e.g. "this position's HF ≥ 1 after a withdrawal"), prefer Invariants — the single universal check covers every future operation without being restated.
 
 ### Intent
 
-A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested operation. Intents carry no resources; input resources are passed as separate arguments and cross-checked inside the Mutator. Intents mirror user actions 1:1 and are naturally shaped for logging, events, and audit trails.
+A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested operation. Intents carry no resources; input resources are passed as separate arguments and cross-checked inside the Mutator. Intents mirror user actions 1:1 and 
 
 ### Access-control convention
 
@@ -121,20 +119,6 @@ A plain struct (`DepositIntent`, `WithdrawIntent`, ...) describing a requested o
 - `PoolState` is an `access(self)` field of `Pool`, so no external reference to `PoolState` ever escapes.
 
 The first rule is lint-checkable and enumerates `Pool`'s external surface by entitlement. The second and third are compiler-enforced: Cadence emits an `access denied` error on any attempt to reach a `PoolState` internal writer from outside `PoolState`, and no code outside `Pool` can obtain an `&PoolState` reference at all. External callability of the `access(all)` entry points is bounded by that last property.
-
-## Assumptions
-
-- Transactions are atomic. All mutations within a tx commit or revert together; `checkInvariants` runs once per operation at the end.
-- `Pool` is single-instance. One `Pool` per contract deployment at a well-known storage path.
-- Position UUIDs are unique and opaque. Each `Position` resource carries its own UUID as the key for its `PositionRecord`.
-- `applyTimeBasedMutations` is idempotent within a block: after the first call in a given block, subsequent calls are no-ops because no time has elapsed.
-
-## Non-Goals
-
-- **Formal verification is not in scope.** Invariant checks plus review are the safety net, not a proof.
-- **Entitlement-based gating for internal writers was considered and rejected.** Cadence permits a composite unrestricted access to methods on its own nested resources via `self.field.method(...)`, bypassing any entitlement on the method. `access(self)` is the only compile-time gate that restricts internal callers, which is why `PoolState`'s internal writers use it.
-- **Interface-based read/write separation (`PoolReader` / `PoolWriter`) was considered and rejected.** Interfaces add ceremony without adding safety beyond what `view` and `access(self)` already enforce.
-- **Batched / multi-operation transactions are not supported.** Each operation is atomic in isolation; multi-op semantics (e.g. `depositAndBorrow`) will require a composite Intent with its own Validator and Mutator.
 
 ## Future Extensions
 
@@ -147,7 +131,4 @@ The first rule is lint-checkable and enumerates `Pool`'s external surface by ent
 
 ## Open Questions
 
-- **Where does pause-state live?** Validators need it, but it currently sits on `Pool`'s config. Move into `PoolState`, or pass into Validators explicitly?
-- **Should Validators live on `PoolState`?** Contract-level keeps them unit-testable without a `PoolState` instance; `PoolState`-local keeps them closer to their data.
-- **Liquidation flagging.** When a position enters liquidation, some invariants (e.g. health factor ≥ 1) must relax. The data shape (flag on `PositionRecord`? separate liquidation log?) is undecided.
-- **`PositionRecord.id`** mirrors the dictionary key and may be redundant.
+- **Should Validators live on `PoolState`?** Contract-level keeps them unit-testable without a `PoolState` instance (if we add an interface type in between); `PoolState`-local keeps them closer to their data.
