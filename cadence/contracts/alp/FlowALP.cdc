@@ -24,31 +24,28 @@ import "FungibleToken"
 ///    mutators are access(contract) (or narrower).
 /// 2. Every method on Pool is either `view` or entitlement-gated. No method on
 ///    Pool is `access(all)` non-view. (Lint-checkable convention.)
-/// 3. Every state-writing method on PoolState is `access(self)`. The public
-///    entry points on PoolState (`deposit`, `withdraw`, `registerPosition`,
-///    `registerToken`) are `access(all)` and internally invoke an `access(self)`
-///    mutator method which applies state changes and calls `checkInvariants`.
+/// 3. PoolState exposes `access(all)` Mutators (`applyDeposit`, `applyWithdraw`,
+///    `registerPosition`, `registerToken`) for Pool to call. Each Mutator
+///    expresses its Validator as `pre` conditions and the universal invariant
+///    check as a `post` condition. Low-level appliers (`applyLedgerDelta`,
+///    `applyVaultDeposit`, `applyReserveWithdraw`) and `invariantsHold` are
+///    `access(self)` and reachable only from inside PoolState.
 ///
 /// DESIGN: Orchestrator / Intent / PoolState pipeline
 /// Every operation is structured as:
 ///
 ///     Pool.someOp:         Internal/Admin/... entitled orchestrator. Builds
-///                          an Intent struct and calls the matching PoolState
-///                          entry point.
+///                          an Intent struct and calls the matching Mutator
+///                          on PoolState.
 ///
-///     PoolState.someOp:    access(all) entry point. Calls:
-///                            1. a contract-level `view` validator that
-///                               inspects an &PoolState and panics on any
-///                               rule violation,
-///                            2. an `access(self)` mutator method on PoolState
-///                               (applyDeposit, applyWithdraw, ...) that
-///                               performs all state changes, calls
-///                               `checkInvariants`, and returns any output
-///                               resources.
+///     PoolState.applyXxx:  access(all) Mutator. Validates via `pre` conditions
+///                          (panic on rule violation), applies state changes by
+///                          calling appliers, and verifies universal invariants
+///                          via the `post` condition (`self.invariantsHold()`).
 ///
 /// Resource I/O.
 /// Intents are plain structs and carry no resources. Input resources are
-/// passed alongside the intent; the mutator asserts on entry that the
+/// passed alongside the intent; the Mutator's `pre` block asserts that the
 /// resource matches the intent's declared type and amount. Output resources
 /// are returned directly.
 ///
@@ -265,30 +262,31 @@ access(all) contract FlowALP {
     /* ---------- Validators ---------- */
 
     /// Validators are `view` functions that inspect a read-only `&PoolState`
-    /// and panic if the intent violates any operation-level rule. They never
-    /// mutate state (enforced by the compiler) and return nothing on success.
+    /// and return `true` if every operation-level rule passes. They are
+    /// invoked from each Mutator's `pre` block, so a `false` return aborts
+    /// the operation before any state change occurs.
 
-    access(contract) view fun validateDeposit(state: &PoolState, intent: DepositIntent) {
+    access(contract) view fun validateDeposit(state: &PoolState, intent: DepositIntent): Bool {
         // TODO: enforce
         //   - state not paused (paused is on Pool's config; requires passing config or snapshot)
-        //   - intent.tokenType is supported
-        //   - intent.positionID refers to an existing position
-        //   - intent.amount > 0
         //   - per-token deposit cap not exceeded
-        let _s = state
-        let _i = intent
+        return intent.amount > 0.0
+            && state.isSupportedToken(tokenType: intent.tokenType)
+            && state.hasPosition(positionID: intent.positionID)
     }
 
-    access(contract) view fun validateWithdraw(state: &PoolState, intent: WithdrawIntent) {
+    access(contract) view fun validateWithdraw(state: &PoolState, intent: WithdrawIntent): Bool {
         // TODO: enforce
         //   - state not paused
-        //   - intent.tokenType is supported
-        //   - intent.positionID refers to an existing position
-        //   - intent.amount > 0
         //   - post-op health factor ≥ 1
         //   - per-token withdraw / borrow caps not exceeded
-        let _s = state
-        let _i = intent
+        return intent.amount > 0.0
+            && state.isSupportedToken(tokenType: intent.tokenType)
+            && state.hasPosition(positionID: intent.positionID)
+    }
+
+    access(contract) view fun validateRegisterPosition(state: &PoolState, id: UInt64): Bool {
+        return !state.hasPosition(positionID: id)
     }
 
     /* ---------- PoolState ---------- */
@@ -298,16 +296,18 @@ access(all) contract FlowALP {
     /// The protocol's mutable state: per-position ledgers, per-token state, and
     /// custody (Reserves). PoolState exposes two layers:
     ///
-    ///   - `access(all)` entry points (`deposit`, `withdraw`, `registerToken`,
-    ///     `registerPosition`): the public API. Each runs a `view` validator
-    ///     then invokes an `access(self)` mutator. These are what Pool calls.
+    ///   - `access(all)` Mutator entry points (`applyDeposit`, `applyWithdraw`,
+    ///     `registerPosition`, `registerToken`): the public API. Validation rules
+    ///     are expressed as `pre` conditions and universal invariants as
+    ///     `post` conditions. Each Mutator is invoked directly by Pool's
+    ///     orchestrators.
     ///
-    ///   - `access(self)` state-writing methods (`applyDeposit`, `applyWithdraw`,
-    ///     `applyLedgerDelta`, `applyVaultDeposit`, `applyReserveWithdraw`,
-    ///     `checkInvariants`): the full set of writers. Compiler guarantees
-    ///     nothing outside PoolState can invoke them.
+    ///   - `access(self)` low-level appliers (`applyLedgerDelta`,
+    ///     `applyVaultDeposit`, `applyReserveWithdraw`) and the invariant
+    ///     check (`invariantsHold`). The compiler guarantees nothing outside
+    ///     PoolState can invoke them.
     ///
-    /// Grep `access(self) fun` inside PoolState to enumerate every writer.
+    /// Grep `access(self) fun` inside PoolState to enumerate every internal writer.
     access(all) resource PoolState {
         /// Positions keyed by the Position resource's UUID.
         access(self) let positions: {UInt64: PositionRecord}
@@ -342,24 +342,67 @@ access(all) contract FlowALP {
             return self.positions[positionID] != nil
         }
 
-        /* ----- Entry points (access(all)) ----- */
-
-        /// Apply a validated deposit operation.
-        access(all) fun deposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
-            FlowALP.validateDeposit(state: &self as &PoolState, intent: intent)
-            self.applyDeposit(intent: intent, vault: <- vault)
+        access(all) view fun isSupportedToken(tokenType: Type): Bool {
+            return self.reserves.isSupported(tokenType: tokenType)
         }
 
-        /// Apply a validated withdrawal and return the resulting vault.
-        access(all) fun withdraw(intent: WithdrawIntent): @{FungibleToken.Vault} {
-            FlowALP.validateWithdraw(state: &self as &PoolState, intent: intent)
-            return <- self.applyWithdraw(intent: intent)
+        /* ----- Mutators (access(all) entry points) -----
+         *
+         * Each Mutator's `pre` block is its Validator: operation-level rules
+         * checked against the time-advanced state. Each Mutator's `post` block
+         * is the invariant check: universal post-state properties that must
+         * hold regardless of which Mutator ran. Both panic on violation,
+         * reverting the transaction.
+         */
+
+        /// Apply a deposit. Cross-checks the vault matches the intent, moves
+        /// the vault into Reserves, credits the position ledger.
+        access(all) fun applyDeposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
+            pre {
+                FlowALP.validateDeposit(state: &self as &PoolState, intent: intent):
+                    "deposit validation failed"
+                vault.getType() == intent.tokenType:
+                    "vault type does not match intent"
+                vault.balance == intent.amount:
+                    "vault amount does not match intent"
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
+            }
+            self.applyVaultDeposit(from: <- vault)
+            self.applyLedgerDelta(
+                positionID: intent.positionID,
+                tokenType: intent.tokenType,
+                delta: SignedAmount(direction: BalanceDirection.Credit, quantity: intent.amount),
+            )
+        }
+
+        /// Apply a withdrawal. Debits the position ledger, withdraws the
+        /// vault from Reserves, and returns it.
+        access(all) fun applyWithdraw(intent: WithdrawIntent): @{FungibleToken.Vault} {
+            pre {
+                FlowALP.validateWithdraw(state: &self as &PoolState, intent: intent):
+                    "withdraw validation failed"
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
+            }
+            self.applyLedgerDelta(
+                positionID: intent.positionID,
+                tokenType: intent.tokenType,
+                delta: SignedAmount(direction: BalanceDirection.Debit, quantity: intent.amount),
+            )
+            return <- self.applyReserveWithdraw(tokenType: intent.tokenType, amount: intent.amount)
         }
 
         /// Register a new position. Called by Pool.openPosition.
         access(all) fun registerPosition(id: UInt64) {
             pre {
-                self.positions[id] == nil: "position already exists"
+                FlowALP.validateRegisterPosition(state: &self as &PoolState, id: id):
+                    "registerPosition validation failed"
+            }
+            post {
+                self.invariantsHold(): "post-state invariants violated"
             }
             self.positions[id] = PositionRecord(id: id)
         }
@@ -371,44 +414,11 @@ access(all) contract FlowALP {
             self.reserves.addSupportedToken(emptyVault: <- emptyVault)
         }
 
-        /* ----- State-writing methods (access(self)) -----
+        /* ----- Low-level appliers (access(self)) -----
          *
-         * The complete set of state-writing code. `access(self)` guarantees
-         * at the language level that nothing outside PoolState invokes any
-         * of these. Grep `access(self) fun` on PoolState to enumerate every
-         * writer.
+         * Single-purpose primitive writers, called only by Mutators.
+         * `access(self)` guarantees nothing outside PoolState can invoke them.
          */
-
-        /// Mutator: apply a deposit. Cross-checks the vault matches the intent,
-        /// moves the vault into Reserves, credits the position ledger, checks
-        /// invariants. Called by the `deposit` entry point after validation.
-        access(self) fun applyDeposit(intent: DepositIntent, vault: @{FungibleToken.Vault}) {
-            pre {
-                vault.getType() == intent.tokenType: "vault type does not match intent"
-                vault.balance == intent.amount: "vault amount does not match intent"
-            }
-            self.applyVaultDeposit(from: <- vault)
-            self.applyLedgerDelta(
-                positionID: intent.positionID,
-                tokenType: intent.tokenType,
-                delta: SignedAmount(direction: BalanceDirection.Credit, quantity: intent.amount),
-            )
-            self.checkInvariants()
-        }
-
-        /// Mutator: apply a withdrawal. Debits the position ledger, withdraws
-        /// the vault from Reserves, checks invariants, and returns the vault.
-        /// Called by the `withdraw` entry point after validation.
-        access(self) fun applyWithdraw(intent: WithdrawIntent): @{FungibleToken.Vault} {
-            self.applyLedgerDelta(
-                positionID: intent.positionID,
-                tokenType: intent.tokenType,
-                delta: SignedAmount(direction: BalanceDirection.Debit, quantity: intent.amount),
-            )
-            let vault <- self.applyReserveWithdraw(tokenType: intent.tokenType, amount: intent.amount)
-            self.checkInvariants()
-            return <- vault
-        }
 
         /// Composes `delta` into the balance of `tokenType` for the given position.
         access(self) fun applyLedgerDelta(
@@ -435,9 +445,9 @@ access(all) contract FlowALP {
             return <- self.reserves.withdraw(tokenType: tokenType, amount: amount)
         }
 
-        /// Invoked at the end of every mutator. Panics on any violation,
-        /// reverting the transaction. Marked `view` so the compiler enforces
-        /// that the check cannot mutate.
+        /// Universal post-state invariant check. Returns true iff every
+        /// invariant holds. Invoked as the `post` condition on every Mutator.
+        /// Marked `view` so the compiler enforces it cannot mutate.
         ///
         /// TODO: implement
         ///   - for each supported token T:
@@ -445,7 +455,9 @@ access(all) contract FlowALP {
         ///   - for each position P:
         ///       healthFactor(P) ≥ 1  (unless P is flagged for liquidation)
         ///   - pool-level caps respected
-        access(self) view fun checkInvariants() {}
+        access(self) view fun invariantsHold(): Bool {
+            return true
+        }
     }
 
     /* ---------- Pool ---------- */
@@ -517,7 +529,7 @@ access(all) contract FlowALP {
                 tokenType: from.getType(),
                 amount: from.balance,
             )
-            self.state.deposit(intent: intent, vault: <- from)
+            self.state.applyDeposit(intent: intent, vault: <- from)
         }
 
         /// Orchestrator: builds a WithdrawIntent and forwards to PoolState.
@@ -532,7 +544,7 @@ access(all) contract FlowALP {
                 tokenType: tokenType,
                 amount: amount,
             )
-            return <- self.state.withdraw(intent: intent)
+            return <- self.state.applyWithdraw(intent: intent)
         }
 
         /// Manually liquidate an unhealthy position.
