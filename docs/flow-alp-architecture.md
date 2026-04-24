@@ -138,9 +138,23 @@ The first rule is lint-checkable and enumerates `Pool`'s external surface by ent
 
 ## Future Extensions
 
-- **Liquidation.** A `liquidate` Mutator on `PoolState` covering borrower, liquidator, repay amount, and seize type. Likely reintroduces a parameter-bundle struct (e.g. `LiquidationParams`) since the input list is wide enough that named fields aid readability.
-- **Interest accrual implementation.** Per-token interest indices on `TokenStateRecord`, written by `applyTimeBasedMutations`, and `pre` / `invariantsHold` rules that compute health factors against the latest indices.
-- **Pool config visible to Mutators.** Mutator `pre` blocks currently see `&PoolState` only. If pause state, risk parameters, etc. need to participate in rule checks, move them into `PoolState` or thread a config snapshot in.
-- **Keeper-triggered time-based mutations.** Since `applyTimeBasedMutations` is already `access(all)` on `PoolState`, a thin Orchestrator on `Pool` could expose it publicly for off-cycle use by keeper bots or indexers.
-- **Lint rule.** CI check flagging any `Pool` method not `view` or entitlement-gated, and any Orchestrator that invokes a Mutator without first calling `applyTimeBasedMutations`.
-- **Observability.** Events on each Mutator invocation, plus a view returning a position's full snapshot.
+- **Pool config visible to Mutators.** Mutator `pre` blocks currently see `&PoolState` only. If pause state, risk parameters, etc. need to participate in rule checks, move them into `PoolState` or thread a config snapshot in. (Same logic applies to PriceOracle state, which acts as an input to the state machine at each operation.)
+- **Prior State Invariants** If invariants depend on the prior state, then we need to adjust the convention, and can't easily use post-conditions for the invariant.
+```cadence
+access(all) fun withdraw(
+    positionID: UInt64,
+    tokenType: Type,
+    amount: UFix64,
+): @{FungibleToken.Vault} {
+    pre {
+        amount > 0.0: "amount must be positive"
+        self.isSupportedToken(tokenType: tokenType): "token type not supported"
+        self.hasPosition(positionID: positionID): "unknown position"
+        // TODO: post-op health factor ≥ 1, per-token withdraw / borrow caps, paused state
+    }
+    phiBeforeMutation = self.computeInvariantFunction()
+    self.applyWithdraw(...)
+    assert(self.invariantsHold(phiBeforeMutation), message: "post-state invariants violated")
+    return <- self.applyReserveWithdraw(tokenType: tokenType, amount: amount)
+}
+```

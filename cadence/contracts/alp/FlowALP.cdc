@@ -424,9 +424,6 @@ access(all) contract FlowALP {
             self.state.registerToken(emptyVault: <- emptyVault)
         }
 
-        access(Admin) fun pause() {}
-        access(Admin) fun unpause() {}
-
         /* ----- Internal orchestrators invoked by Position ----- */
 
         /// Orchestrator: forwards a deposit to PoolState.
