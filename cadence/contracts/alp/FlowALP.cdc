@@ -489,8 +489,7 @@ access(all) contract FlowALP {
 
         /// Borrows the pool reference using the Position's internal capability.
         access(self) fun borrowPool(): auth(Internal) &Pool {
-            let pool = self.poolCap.borrow() ?? panic("pool capability unavailable")
-            return pool
+            return self.poolCap.borrow() ?? panic("pool capability unavailable")
         }
 
         /// Deposits funds into the position.
