@@ -24,7 +24,7 @@ import "FungibleToken"
 ///    mutators are access(contract) (or narrower).
 /// 2. Every method on Pool is either `view` or entitlement-gated. No method on
 ///    Pool is `access(all)` non-view. (Lint-checkable convention.)
-/// 3. PoolState exposes `access(all)` Mutators (`applyDeposit`, `applyWithdraw`,
+/// 3. PoolState exposes `access(all)` Mutators (`deposit`, `withdraw`,
 ///    `registerPosition`, `registerToken`) for Pool to call. Each Mutator
 ///    expresses its operation-level rules as `pre` conditions and the universal
 ///    invariant check as a `post` condition. Low-level appliers
@@ -37,10 +37,11 @@ import "FungibleToken"
 ///     Pool.someOp:         Internal/Admin/... entitled orchestrator. Forwards
 ///                          caller arguments to the matching Mutator on PoolState.
 ///
-///     PoolState.applyXxx:  access(all) Mutator. `pre` block validates inputs
-///                          and operation-level rules; body invokes appliers;
-///                          `post` block calls `self.invariantsHold()` to
-///                          verify universal invariants.
+///     PoolState.<Mutator>: access(all) method (e.g. `deposit`, `withdraw`).
+///                          `pre` block validates inputs and operation-level
+///                          rules; body invokes appliers; `post` block calls
+///                          `self.invariantsHold()` to verify universal
+///                          invariants.
 ///
 /// Resource I/O.
 /// Resources flow as direct arguments and return values: input resources are
@@ -222,7 +223,7 @@ access(all) contract FlowALP {
     /// The protocol's mutable state: per-position ledgers, per-token state, and
     /// custody (Reserves). PoolState exposes two layers:
     ///
-    ///   - `access(all)` Mutator entry points (`applyDeposit`, `applyWithdraw`,
+    ///   - `access(all)` Mutator entry points (`deposit`, `withdraw`,
     ///     `registerPosition`, `registerToken`): the public API. Validation rules
     ///     are expressed as `pre` conditions and universal invariants as
     ///     `post` conditions. Each Mutator is invoked directly by Pool's
@@ -269,7 +270,7 @@ access(all) contract FlowALP {
 
         /// Apply a deposit. Moves the vault into Reserves and credits the position ledger.
         /// The vault itself supplies tokenType and amount.
-        access(all) fun applyDeposit(positionID: UInt64, vault: @{FungibleToken.Vault}) {
+        access(all) fun deposit(positionID: UInt64, vault: @{FungibleToken.Vault}) {
             pre {
                 vault.balance > 0.0: "amount must be positive"
                 self.isSupportedToken(tokenType: vault.getType()): "token type not supported"
@@ -291,7 +292,7 @@ access(all) contract FlowALP {
 
         /// Apply a withdrawal. Debits the position ledger, withdraws the
         /// vault from Reserves, and returns it.
-        access(all) fun applyWithdraw(
+        access(all) fun withdraw(
             positionID: UInt64,
             tokenType: Type,
             amount: UFix64,
@@ -431,7 +432,7 @@ access(all) contract FlowALP {
         /// Orchestrator: forwards a deposit to PoolState.
         /// TODO: consider splitting deposit collateral vs repay debt into distinct methods.
         access(Internal) fun internalDeposit(positionUUID: UInt64, from: @{FungibleToken.Vault}) {
-            self.state.applyDeposit(positionID: positionUUID, vault: <- from)
+            self.state.deposit(positionID: positionUUID, vault: <- from)
         }
 
         /// Orchestrator: forwards a withdrawal to PoolState.
@@ -441,7 +442,7 @@ access(all) contract FlowALP {
             tokenType: Type,
             amount: UFix64
         ): @{FungibleToken.Vault} {
-            return <- self.state.applyWithdraw(
+            return <- self.state.withdraw(
                 positionID: positionUUID,
                 tokenType: tokenType,
                 amount: amount,

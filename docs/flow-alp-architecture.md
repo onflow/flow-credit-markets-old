@@ -89,7 +89,7 @@ If validation logic gets complex enough to deserve naming, factor it into a `vie
 `access(all)` methods on `PoolState` that form the API surface exposed to the Orchestrator. The Orchestrator has already called `applyTimeBasedMutations` by the time a Mutator is invoked. Each Mutator's three phases (validate, apply, invariants) are expressed in Cadence's pre/body/post structure:
 
 ```cadence
-access(all) fun applyDeposit(positionID: UInt64, vault: @{FungibleToken.Vault}) {
+access(all) fun deposit(positionID: UInt64, vault: @{FungibleToken.Vault}) {
     pre {
         vault.balance > 0.0: "amount must be positive"
         self.isSupportedToken(tokenType: vault.getType()): "token type not supported"
@@ -130,7 +130,7 @@ Mutator signatures take primitive arguments (and resources) directly. There is n
 
 - Every method on `Pool` is either `view` or entitlement-gated. No `access(all)` non-view methods on `Pool`; no `access(contract)` non-view methods on `Pool`.
 - State-writing methods on `PoolState` are either:
-  - `access(all)` Mutators / entry points (`applyTimeBasedMutations`, `applyDeposit`, `applyWithdraw`, `registerPosition`, `registerToken`), invoked only through `Pool`'s orchestrators, OR
+  - `access(all)` Mutators / entry points (`applyTimeBasedMutations`, `deposit`, `withdraw`, `registerPosition`, `registerToken`), invoked only through `Pool`'s orchestrators, OR
   - `access(self)` internals (appliers and `invariantsHold`), invoked only from within `PoolState`.
 - `PoolState` is an `access(self)` field of `Pool`, so no external reference to `PoolState` ever escapes.
 
