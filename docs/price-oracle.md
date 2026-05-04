@@ -75,8 +75,6 @@ Two methods. The interface is part of this spec; implementations MUST NOT add me
 
 A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<WorldCurrencies.USD>()`). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C3 below), not at query time.
 
-If an implementation aggregates multiple underlying oracles, all MUST share the same `unitOfAccount`. Verified on every `price()` call — a UoA mismatch returns `nil` via N4. Construction-time verification alone is insufficient because a source's storage-path target can be replaced after construction.
-
 ### Nil Contract
 
 `price()` returns `nil` when the oracle can't produce a price the caller should rely on. Every implementation MUST return `nil` in at least:
@@ -108,7 +106,7 @@ Consumers of `price(ofToken: T)`:
 - **C3 — Verify UoA at registration.** At wire-up, assert: `assert(oracle.unitOfAccount == Type<WorldCurrencies.USD>(), message: "UoA mismatch")`. Consumers MAY re-check per query for defense-in-depth; aggregators internally do (Semantics → Unit of account).
 - **C4 — Assume non-determinism across blocks.** `price()` may return different values across blocks. No reliance on monotonicity or bounded rate-of-change. Same-block repeats DO return the same value (invariant II), so caching within a single transaction is safe; caching across blocks is not. If bounded rate-of-change is needed, wrap the oracle (Extension: Volatility Circuit Breaker).
 - **C5 — Read once per operation.** "Operation" = one logical decision (a single position's liquidation check, a single Net Asset Value [NAV] snapshot). Read `price()` once at the start of the operation and use the value throughout. Don't re-read inside loops. For operations that span multiple tokens (basket NAV), read each token's oracle once and treat any nil as all-nil (C1 hard stop applied to the whole basket).
-- **C6 — Panic awareness.** `price()` may panic in read-through implementations (stateless aggregator, single-source oracle reaching an external contract — see I6 below). Cadence cannot catch it; the caller's transaction aborts. Callers MUST confine `price()` calls to contexts where transaction abort is an acceptable failure mode (not: batch liquidation of many positions; not: multi-token NAV computation where a single source panic reverts everything).
+- **C6 — Panic awareness.** `price()` may panic in read-through implementations (e.g., a single-source oracle reaching an external contract — see I6 below). Cadence cannot catch it; the caller's transaction aborts. Callers MUST confine `price()` calls to contexts where transaction abort is an acceptable failure mode (not: batch liquidation of many positions; not: multi-token NAV computation where a single source panic reverts everything).
 
 ## Implementer Requirements
 
@@ -174,7 +172,7 @@ A source drops, sources diverge, or the current observation deviates past the br
 
 ### Scenario c — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
 
-Scheduled tx stops running (scheduler stall, operator action, bug). `history.last.publishTime` does not advance. Once `now − history.last.publishTime > stalenessBound`, `price()` returns nil via N3 (B.V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (B.III + capability topology). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
+Scheduled tx stops running (scheduler stall, operator action, bug). The most recent accepted observation is not refreshed. Once it ages past the staleness bound, `price()` returns nil via N3 (B.V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (B.III + capability topology). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
 
 ### Scenario d — warm-up
 
