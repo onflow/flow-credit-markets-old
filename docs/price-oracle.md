@@ -54,19 +54,19 @@ access(all) struct PriceReading {
 }
 
 access(all) struct interface PriceOracle {
-    access(all) view fun unitOfAccount(): Type
+    access(all) let unitOfAccount: Type
     access(all) fun price(ofToken: Type): PriceReading?
 }
 ```
 
 Two methods. The interface is part of this spec; implementations MUST NOT add methods returning a price without the full safety contract.
 
-- `unitOfAccount()` — constant over the struct's lifetime (invariant I). `view`. Single source of truth for the oracle's unit of account; used for the registration handshake (C3).
+- `unitOfAccount` — immutable `let` field, set once at `init`. Type-enforced constancy across the struct's lifetime (invariant I). Single source of truth for the oracle's unit of account; used for the registration handshake (C3).
 - `price(ofToken)` — returns non-nil only if every Nil Contract condition holds; no panic under all failure modes (see I6 below). Not `view`: implementations may on demand refresh a cache, pull from a price source, or transact cross into Flow EVM (e.g., to call a Pyth update). Side effects MUST NOT alter future observations (invariant II). Querying an unsupported token is a normal `nil` (see N1 below).
 
 **`PriceReading` is the only way to observe a price.** `value` and `publishTime` are bundled in one atomic return so callers cannot observe one without the other. The interface MUST NOT offer a separate `publishTimeOf(token: Type)` getter — a two-call pattern reintroduces a race between the reads and defeats I7.
 
-- `value` — price denominated in `unitOfAccount()` per one token, at `publishTime`.
+- `value` — price denominated in `unitOfAccount` per one token, at `publishTime`.
 - `publishTime` — source-attested observation time (I7). For aggregators, the oldest contributing source's publishTime (min-semantics); for breakers, the publishTime of the last accepted observation, unchanged.
 
 ## Semantics
@@ -75,7 +75,7 @@ Two methods. The interface is part of this spec; implementations MUST NOT add me
 
 A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<WorldCurrencies.USD>()`). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C3 below), not at query time.
 
-If an implementation aggregates multiple underlying oracles, all MUST share the same `unitOfAccount()`. Verified on every `price()` call — a UoA mismatch returns `nil` via N4. Construction-time verification alone is insufficient because a source's storage-path target can be replaced after construction.
+If an implementation aggregates multiple underlying oracles, all MUST share the same `unitOfAccount`. Verified on every `price()` call — a UoA mismatch returns `nil` via N4. Construction-time verification alone is insufficient because a source's storage-path target can be replaced after construction.
 
 ### Nil Contract
 
@@ -93,8 +93,8 @@ If an implementation aggregates multiple underlying oracles, all MUST share the 
 
 A compliant implementation maintains the following at all times.
 
-- **(I) Identity immutability.** `unitOfAccount()` is fixed at `init` and never mutates at runtime. The set of tokens the oracle is configured to price is also fixed at `init`. Changing either requires replacing the struct.
-- **(II) Query idempotence.** `unitOfAccount()` is `view` (compile-time pure). `price()` is not `view` — side effects are permitted — but MUST NOT alter the value of a subsequent `price()` call beyond what a fresh query against live source data would already produce. Repeated `price(ofToken: T)` within the same block MUST return the same result.
+- **(I) Identity immutability.** `unitOfAccount` is a `let` field — type-enforced fixed at `init`, never mutates at runtime. The set of tokens the oracle is configured to price is also fixed at `init`. Changing either requires replacing the struct.
+- **(II) Query idempotence.** `price()` is not `view` — side effects are permitted — but MUST NOT alter the value of a subsequent `price()` call beyond what a fresh query against live source data would already produce. Repeated `price(ofToken: T)` within the same block MUST return the same result.
 - **(III) Reliability of non-nil.** Every non-nil `price(ofToken: T)` at time `t` satisfies every Nil Contract condition at `t`.
 - **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero.
 - **(V) Source publish-time propagation.** Source-attested `publishTime` values are propagated through aggregation and history without being relabeled with pull time, insertion time, or `block.timestamp`. Type-enforced by `PriceReading.publishTime` being a `let` field set at construction; downstream layers MUST forward it (single-source) or take the `min` across contributing source publishTimes (aggregator).
@@ -104,8 +104,8 @@ A compliant implementation maintains the following at all times.
 Consumers of `price(ofToken: T)`:
 
 - **C1 — Treat `nil` as a hard stop.** Every decision that depends on the price MUST abort or defer. No substituting a default, stale cache, or last-known-good.
-- **C2 — Respect the unit of account.** Returned `UFix64` is in `unitOfAccount()` units (by convention the Numeraire). Different-unit conversions are the caller's responsibility.
-- **C3 — Verify UoA at registration.** At wire-up, assert: `assert(oracle.unitOfAccount() == Type<WorldCurrencies.USD>(), message: "UoA mismatch")`. Consumers MAY re-check per query for defense-in-depth; aggregators internally do (Semantics → Unit of account).
+- **C2 — Respect the unit of account.** Returned `UFix64` is in `unitOfAccount` units (by convention the Numeraire). Different-unit conversions are the caller's responsibility.
+- **C3 — Verify UoA at registration.** At wire-up, assert: `assert(oracle.unitOfAccount == Type<WorldCurrencies.USD>(), message: "UoA mismatch")`. Consumers MAY re-check per query for defense-in-depth; aggregators internally do (Semantics → Unit of account).
 - **C4 — Assume non-determinism across blocks.** `price()` may return different values across blocks. No reliance on monotonicity or bounded rate-of-change. Same-block repeats DO return the same value (invariant II), so caching within a single transaction is safe; caching across blocks is not. If bounded rate-of-change is needed, wrap the oracle (Extension: Volatility Circuit Breaker).
 - **C5 — Read once per operation.** "Operation" = one logical decision (a single position's liquidation check, a single Net Asset Value [NAV] snapshot). Read `price()` once at the start of the operation and use the value throughout. Don't re-read inside loops. For operations that span multiple tokens (basket NAV), read each token's oracle once and treat any nil as all-nil (C1 hard stop applied to the whole basket).
 - **C6 — Panic awareness.** `price()` may panic in read-through implementations (stateless aggregator, single-source oracle reaching an external contract — see I6 below). Cadence cannot catch it; the caller's transaction aborts. Callers MUST confine `price()` calls to contexts where transaction abort is an acceptable failure mode (not: batch liquidation of many positions; not: multi-token NAV computation where a single source panic reverts everything).
@@ -152,7 +152,7 @@ Each source datum carries an attested publish time (Pyth `publishTime`, BandOrac
 
 ## Authorities
 
-- **Query path** — any caller. `unitOfAccount()` is compile-time `view`. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-block repeats return the same value, and no side effect may alter a subsequent query's result.
+- **Query path** — any caller. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-block repeats return the same value, and no side effect may alter a subsequent query's result.
 - **Scheduled-tx entitlement** — scoped to the circuit breaker's `CircuitBreaker.executeTransaction` (called by `FlowTransactionScheduler`). Not applicable to the aggregator (stateless). Not callable by public traffic.
 - **Deployment** — creating, wiring, and retiring oracles at the protocol layer is outside this interface. Deployed oracles are immutable (invariant I); any change requires recreation.
 
@@ -199,12 +199,10 @@ Rationale:
 
 ```cadence
 access(all) struct AggregatorOracle: PriceOracle {
+    access(all) let unitOfAccount: Type
     access(self) let _token: Type
-    access(self) let _unitOfAccount: Type
     access(self) let _sources: [{PriceOracle}]
     // plus config for staleness (N3), spread (N5), aggregation
-
-    access(all) view fun unitOfAccount(): Type { return self._unitOfAccount }
 
     access(all) fun price(ofToken: Type): PriceReading? {
         if ofToken != self._token { return nil }
@@ -265,8 +263,8 @@ Mutable persistent state (`history`) is a `CircuitBreaker` *resource* stored on 
 // call directly into this resource — no separate handler needed.
 access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler, ViewResolver.Resolver {
     // Immutable identity + config (set at init).
+    access(all) let unitOfAccount: Type
     access(self) let _token: Type
-    access(self) let _unitOfAccount: Type
     access(self) let _upstream: {PriceOracle}                // the oracle being wrapped (embedded struct)
     // plus config for staleness bound (N3), deviation threshold (trip), history window, etc.
 
@@ -276,7 +274,6 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
 
     // Public method surface — external callers go through methods, not field reads.
     access(all) view fun token(): Type { return self._token }
-    access(all) view fun unitOfAccount(): Type { return self._unitOfAccount }
 
     // Single-point read: returns the last accepted reading iff still within the staleness bound.
     //   - history empty → nil (warm-up).
@@ -311,24 +308,17 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
 
 // Queryable shell held by consumers. Forwards to the underlying CircuitBreaker.
 access(all) struct CircuitBreakerOracle: PriceOracle {
+    access(all) let unitOfAccount: Type
     access(self) let _breaker: Capability<&CircuitBreaker>
-    // UoA and token are immutable (Invariant I), so we snapshot at construction.
-    // unitOfAccount() and the token-match branch in price() stay panic-free
-    // even if the underlying resource is later destroyed.
-    access(self) let _unitOfAccount: Type
     access(self) let _token: Type
 
     init(breaker: Capability<&CircuitBreaker>) {
         // Init-time panic is loud (deployment fails) and acceptable — the oracle
         // never exists in a broken state. Post-init, queries never panic.
         let b = breaker.borrow() ?? panic("CircuitBreakerOracle: capability does not resolve")
+        self.unitOfAccount = b.unitOfAccount
         self._breaker = breaker
-        self._unitOfAccount = b.unitOfAccount()
         self._token = b.token()
-    }
-
-    access(all) view fun unitOfAccount(): Type {
-        return self._unitOfAccount
     }
 
     access(all) fun price(ofToken: Type): PriceReading? {
@@ -476,7 +466,6 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 
 Deliberate acknowledgments where the spec's safety model has honest gaps.
 
-- **Lying implementer.** No invariant in this spec prevents a `PriceOracle` implementation from returning a value that is internally self-consistent (correct `unitOfAccount()`, plausible `publishTime`) but semantically wrong (price value lies). The sole defense is multi-source aggregation (I1) with at least one non-on-chain source — a bad source gets dominated by honest peers. This is a governance/audit concern for mature deployment, not a technical enforcement layer.
 - **Capability-swap with matching UoA.** Per-call UoA verification catches a source whose storage-path target is re-bound to a different-UoA oracle. It does NOT catch a swap to a different oracle with the same UoA (e.g., WETH/USD swapped to WBTC/USD). Future mitigation: pin source identity (address + path hash or capability controller ID) at construction and re-verify per tick.
 
 
