@@ -67,7 +67,7 @@ The interface deliberately omits an observation timestamp from the public return
 
 ### Unit of account [UoA]
 
-A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<WorldCurrencies.USD>()`). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C3 below), not at query time.
+A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<USD>()`, defined in [Numeraire spec](./Numeraire.md)). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C3 below), not at query time.
 
 ### Nil Contract
 
@@ -98,7 +98,7 @@ Consumers of `price(ofToken: T)`:
 
 - **C1 — Treat `nil` as a hard stop.** Every decision that depends on the price MUST abort or defer. No substituting a default, stale cache, or last-known-good.
 - **C2 — Respect the unit of account.** Returned `UFix64` is in `unitOfAccount` units (by convention the Numeraire). Different-unit conversions are the caller's responsibility.
-- **C3 — Verify UoA at registration.** At wire-up, assert: `assert(oracle.unitOfAccount == Type<WorldCurrencies.USD>(), message: "UoA mismatch")`. Type-enforced constancy via the `let unitOfAccount` field (invariant I) means a single registration-time check is sufficient — re-checking per query is not required.
+- **C3 — Verify UoA at registration.** At wire-up, assert that the oracle's `unitOfAccount` matches the protocol numeraire (defined in [Numeraire spec](./Numeraire.md), currently `Type<USD>()`): `assert(oracle.unitOfAccount == Type<USD>(), message: "UoA mismatch")`. Type-enforced constancy via the `let unitOfAccount` field (invariant I) means a single registration-time check is sufficient — re-checking per query is not required.
 - **C4 — Assume non-determinism across blocks.** `price()` may return different values across blocks. No reliance on monotonicity or bounded rate-of-change. Same-block repeats DO return the same value (invariant II), so caching within a single transaction is safe; caching across blocks is not. If bounded rate-of-change is needed, wrap the oracle (Extension: Volatility Circuit Breaker).
 - **C5 — Read once per operation.** "Operation" = one logical decision (a single position's liquidation check, a single Net Asset Value [NAV] snapshot). Read `price()` once at the start of the operation and use the value throughout. Don't re-read inside loops. For operations that span multiple tokens (basket NAV), read each token's oracle once and treat any nil as all-nil (C1 hard stop applied to the whole basket).
 - **C6 — Panic awareness.** A read-through `price()` (e.g., a single-source oracle reaching an external contract) can panic — Cadence cannot catch it; the caller's transaction aborts (see I6). Callers MUST confine reads from such oracles to contexts where transaction abort is acceptable (not batch liquidation; not multi-token NAV where one panic reverts everything). Breaker-wrapped oracles are structurally panic-free and not subject to this restriction.
