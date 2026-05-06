@@ -32,7 +32,7 @@ The spec makes the following axiomatic assumptions. If any is violated, the conc
 
 - **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources — uncorrelated in their failure modes and vulnerability to manipulation. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
 - **Sources attest `publishTime` truthfully.** A source MUST report the actual moment its value was observed — not the query time, not the chain's current `block.timestamp`. If a source misreports `publishTime`, staleness checks (N3) are defeated. Staleness is anchored on source-attested `publishTime`, never `block.timestamp`; substituting the latter would launder pull-style stale data (e.g., a Pyth contract sitting unrefreshed) past the staleness check. Real-world clock drift between source-attested time and chain time is absorbed into staleness-bound calibration; suspiciously future-dated readings (buggy or adversarial source) are caught at the wrapper layer via N4 — see the `PriceSource` contract.
-- **Majority-honest sources (Byzantine bound).** Across N sources, strictly fewer than half are simultaneously compromised or stale. Required for median aggregation to be robust and for the spread check to be a useful signal.
+- **Majority-honest sources (Byzantine bound).** Across N≥3 sources, strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 this collapses to "no compromised source" and median collapses to mean — spread check N5 carries the load.)
 
 ## Nomenclature
 
