@@ -57,7 +57,7 @@ access(all) struct interface PriceOracle {
 The interface is the consumer-facing surface. Implementations MUST NOT add methods returning a price without the full safety contract.
 
 - `unitOfAccount` — immutable `let` field, set once at `init`. Type-enforced constancy across the struct's lifetime (invariant I). Single source of truth for the oracle's unit of account; used for the registration handshake (C3).
-- `price(ofToken)` — returns a `UFix64` price denominated in `unitOfAccount` per one token, or `nil` if any Nil Contract condition holds. Implementations MUST NOT add panic surface beyond irreducible upstream panic (see I6 below). Not `view`: implementations may on demand refresh a cache, pull from a price source, or transact cross into Flow EVM (e.g., to call a Pyth update). Side effects MUST NOT alter future observations (invariant II). Querying an unsupported token is a normal `nil` (see N1 below).
+- `price(ofToken)` — returns a `UFix64` price denominated in `unitOfAccount` per one token, or `nil` if any Nil Contract condition holds. Implementations MUST NOT add panic surface beyond irreducible upstream panic (see I6 below). Not `view`: implementations may on demand refresh a cache, pull from a price source, or transact cross into Flow EVM (e.g., to call a Pyth update). Same-block repeats MUST return the same value (invariant II). Querying an unsupported token is a normal `nil` (see N1 below).
 
 The interface deliberately omits an observation timestamp from the public return. Staleness is enforced by the implementation (configured at construction; nil-on-stale via N3) — consumers don't see the source-attested time, only its "fresh enough or nil" verdict. Internal pipeline components (aggregator, breaker) carry richer observation data on their own non-public types; see the Aggregator and Volatility Circuit Breaker extensions.
 
@@ -86,7 +86,7 @@ A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single to
 A compliant implementation maintains the following at all times.
 
 - **(I) Identity immutability.** `unitOfAccount` is a `let` field — type-enforced fixed at `init`, never mutates at runtime. The set of tokens the oracle is configured to price is also fixed at `init`. Changing either requires replacing the struct.
-- **(II) Query idempotence.** `price()` is not `view` — side effects are permitted — but MUST NOT alter the value of a subsequent `price()` call beyond what a fresh query against live source data would already produce. Repeated `price(ofToken: T)` within the same block MUST return the same result.
+- **(II) Query idempotence.** `price()` is not `view` — side effects are permitted. Repeated `price(ofToken: T)` within the same block MUST return the same result.
 - **(III) Reliability of non-nil.** A non-nil `price(ofToken: T)` at time `t` is returned only if no Nil Contract condition holds at `t` — i.e., `¬N1 ∧ … ∧ ¬N5`.
 - **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero.
 
@@ -127,7 +127,7 @@ Every implementation MUST enumerate its documented nil conditions in a doc comme
 
 ### I5 — Non-view discipline.
 
-Implementer guidance for achieving invariant II under a non-`view` `price()`: Implementations MAY have side effects (e.g. lazy cache refresh, pull-source feed advancement, crossing into Flow EVM for Pyth update calls, observability signalling) but MUST ensure those side effects do not alter the value of a subsequent `price()` call relative to what a fresh query against live sources would produce, and that same-block repeats return the same result. Persistent state mutation (history append, cache write on the scheduled tick) belongs on entitled methods outside this interface, not on `price()` itself.
+Implementer guidance for achieving invariant II under a non-`view` `price()`: Implementations MAY have side effects (e.g. lazy cache refresh, pull-source feed advancement, crossing into Flow EVM for Pyth update calls, observability signalling) but MUST ensure same-block repeats of `price()` return the same value. Persistent state mutation (history append, cache write on the scheduled tick) belongs on entitled methods outside this interface, not on `price()` itself.
 
 ### I6 — Panic risk.
 
@@ -141,7 +141,7 @@ Consumer responsibility: see C6.
 
 ## Authorities
 
-- **Query path** — any caller. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-block repeats return the same value, and no side effect may alter a subsequent query's result.
+- **Query path** — any caller. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-block repeats return the same value.
 - **Scheduled-tx entitlement** — scoped to the circuit breaker's `CircuitBreaker.executeTransaction` (called by `FlowTransactionScheduler`). Not callable by public traffic.
 - **Deployment** — creating, wiring, and retiring oracles at the protocol layer is outside this interface. Deployed oracles are immutable (invariant I); any change requires recreation.
 
