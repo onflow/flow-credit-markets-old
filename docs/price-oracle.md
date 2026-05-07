@@ -287,8 +287,9 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
     // plus config for staleness bound (N3), deviation threshold (trip), history window, etc.
 
     access(self) let _history: [PriceReading]                // accepted observations; consumers read via current()
-    access(self) var _prevObservation: PriceReading?         // most recent observation (accepted OR tripped); base for σ̂² update chain
-    access(self) var _sigmaSquared: UFix64                   // running variance estimate
+    access(self) var _prevObservation: PriceReading?         // most recent observation (accepted OR tripped); base for the (μ̂, σ̂²) update chain
+    access(self) var _meanReturn: UFix64                     // running mean of Δt-normalized log returns
+    access(self) var _sigmaSquared: UFix64                   // running variance estimate (mean-corrected)
 
     // Public method surface — external callers go through methods, not field reads.
     access(all) view fun token(): Type { return self._token }
@@ -310,11 +311,11 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
         // 1. Pull (pₖ, τₖ) from self._upstream.observe(ofToken: self._token).
         //    If reading is nil → no-op this tick.
         // 2. If self._prevObservation is nil (warm-up) → set it, skip σ̂²/trip eval.
-        // 3. Compute uₖ = log(pₖ / prev.value) / √(τₖ − prev.publishTime).
-        // 4. Evaluate trip: |uₖ| > k · sqrt(self._sigmaSquared) ?
+        // 3. Compute uₖ = log(pₖ / prev.value) / √(τₖ − prev.publishTime); δₖ = uₖ − self._meanReturn.
+        // 4. Evaluate trip: |δₖ| > k · sqrt(self._sigmaSquared) ?
         //    If trip → emit trip event; DO NOT append to history.
         //    Else   → append reading to history; emit acceptance event.
-        // 5. Update self._sigmaSquared via EMA (always, regardless of trip).
+        // 5. Update self._meanReturn and self._sigmaSquared via mean-corrected EWMA (always, regardless of trip).
         // 6. Prune history outside [τₖ − historyWindow, τₖ].
         // 7. Update self._prevObservation = reading (always, regardless of trip).
     }
@@ -368,14 +369,15 @@ The breaker depends on `FlowTransactionScheduler` calling `executeTransaction` o
 
 ### Metric shape
 
-**Recommended default: time-weighted EMA of variance with configurable trip threshold.**
+**Recommended default: time-weighted mean-corrected EWMA of return variance with configurable trip threshold.**
 
 ### State
 
 Per breaker:
 - `history: [PriceReading]` — **accepted observations only**. Serves consumers via `history.last`.
 - `prevObservation: PriceReading?` — **most recent observation** (whether accepted or tripped). Used as the base for each tick's return computation.
-- `σ̂²` — running variance estimate.
+- `μ̂` — running mean of Δt-normalized log returns.
+- `σ̂²` — running variance estimate (mean-corrected via West-style recurrence).
 
 ### Per-tick update
 
@@ -383,29 +385,34 @@ On each scheduled tick, observe `(pₖ, τₖ)` from upstream. Let `(pₚ, τₚ
 
 ```
 Δτₖ  =  τₖ  −  τₚ
-uₖ   =  log(pₖ / pₚ)  /  √Δτₖ                 (Δt-normalized log return, measured from previous observation)
-αₖ   =  1  −  exp(−Δτₖ / T)                    (time-adaptive smoothing; T = decay time constant)
-σ̂²ₖ  =  αₖ · uₖ²  +  (1 − αₖ) · σ̂²ₖ₋₁           (EMA variance update — always applied)
+uₖ   =  log(pₖ / pₚ)  /  √Δτₖ                                   (Δt-normalized log return)
+αₖ   =  1  −  1 / 2^(Δτₖ / τ_half)                                (time-adaptive smoothing; τ_half = half-life)
+μ̂ₖ   =  μ̂ₖ₋₁  +  αₖ · (uₖ − μ̂ₖ₋₁)                              (running mean update — always applied)
+σ̂²ₖ  =  (1 − αₖ) · σ̂²ₖ₋₁  +  αₖ · (uₖ − μ̂ₖ)(uₖ − μ̂ₖ₋₁)        (mean-corrected EWMA variance update — always applied)
 
-Trip   =  |uₖ|  >  k · σ̂ₖ₋₁
+Trip   =  |uₖ − μ̂ₖ₋₁|  >  k · σ̂ₖ₋₁                              (deviation from tracked mean exceeds threshold)
 
 if not Trip:  append (pₖ, τₖ) to history       (cache advances, consumers see new value)
 always:       prevObservation = (pₖ, τₖ)       (measurement chain advances regardless of trip)
 ```
 
+> **Implementation note:** Cadence does not currently expose a native `2^(·)`; production implementations should use range reduction with a precomputed binary-fraction lookup table (the standard on-chain fixed-point approach, see [ABDK Math 64.64](https://github.com/abdk-consulting/abdk-libraries-solidity)'s `exp_2` for prior art).
+>
+> **Warm-up:** `μ̂` and `σ̂²` initial values, and the number of ticks before trip evaluation is performed, are implementation-defined. Consumers see nil from `price()` during warm-up regardless (since `history` is empty until the first acceptance).
+
 ### What this separates
 
-- **`σ̂²`** is a pure function of the observed stream — updates every tick via `prevObservation` chain. Adapts to regime changes naturally through EMA.
+- **`(μ̂, σ̂²)`** are pure functions of the observed stream — updated every tick via the `prevObservation` chain. Adapt to regime changes naturally through the EWMA.
 - **`history` (cache)** only advances on accepted observations — consumers see the last-known-good value; trip freezes it until staleness fires nil.
 - **`prevObservation`** is pure measurement state — tracks the raw stream independently of what's been served.
 
 Three concerns, three state variables, no overloading.
 
 Parameters (calibration open per asset, see Open Questions):
-- `T` — EMA decay time constant; matches the timescale over which the breaker adapts.
+- `τ_half` — EWMA half-life; the elapsed time after which a sample's weight halves. Matches the timescale over which the breaker adapts.
 - `k` — trip threshold in units of `σ̂`. Higher `k` → fewer false trips, more false negatives. Calibrated empirically per asset.
 
-Chosen because: handles irregular observation spacing natively (via Δt-normalization); O(1) state and O(1) compute per tick; volatility-adaptive (trip threshold scales with recent volatility rather than a fixed deviation bound); under the `Δ_max` source-spread bound (Source-time spread, below), bias is upward and bounded — breaker fails *safe* (less sensitive, not more).
+Chosen because: handles irregular observation spacing natively (via Δt-normalization); O(1) state and O(1) compute per tick; volatility-adaptive (trip threshold scales with recent volatility rather than a fixed deviation bound); under the `Δ_max` source-spread bound (Source-time spread, below), bias is upward and bounded — breaker fails *safe* (less sensitive, not more). Trade-off: trips more often during sustained legitimate moves than a zero-mean form would; accepted because the alternative absorbs drift into σ̂² and could mask multi-tick cross-venue manipulation that N5 cannot see (all sources agree).
 
 Alternative metrics remain open.
 
@@ -427,7 +434,7 @@ D_observed  =  D_true  +  ε({Δ⁽ᵏ⁾})
 
 `ε` is non-zero mean when spreads correlate with price direction (e.g., one source reliably publishes slower during volatile periods). Variance estimators in particular are *inflated* by this noise.
 
-**Required: the aggregator MUST enforce `Δ⁽ᵏ⁾ ≤ Δ_max`** and reject (nil) aggregations exceeding it. `Δ_max` is chosen so `ε` is dominated by signal in the regime of interest — concretely, small relative to the chosen metric's decay time (e.g., `Δ_max ≪ T` for the recommended EMA variance, so aggregate-blend bias is a small fraction of `σ̂²`).
+**Required: the aggregator MUST enforce `Δ⁽ᵏ⁾ ≤ Δ_max`** and reject (nil) aggregations exceeding it. `Δ_max` is chosen so `ε` is dominated by signal in the regime of interest — concretely, small relative to the chosen metric's decay time (e.g., `Δ_max ≪ τ_half` for the recommended EWMA variance, so aggregate-blend bias is a small fraction of `σ̂²`).
 
 The recommended default metric (see Metric shape, below) is valid under this bound. Alternative metrics that are *intrinsically* spread-aware — modeling `p⁽ᵏ⁾` as a window average rather than a point sample, using time-density-normalized returns, etc. — could relax this bound but must define their `ε` explicitly, not hand-wave it.
 
@@ -438,7 +445,7 @@ The recommended default metric (see Metric shape, below) is valid under this bou
 - **B.III Query idempotence.** Specialization of Invariant II / I5: consumer reads cannot mutate breaker state; state mutation is restricted to the scheduled-tick context. Same-block reads return the same value.
 - **B.IV Atomic per-tick update.** Each scheduled tick either commits its state transition — new observation, any pruning — in full, or commits nothing. No partial states.
 - **B.V History monotonic and window-bounded.** The internal observation log is strictly increasing in `publishTime`; retained entries lie within a configured window ending at the most recent observation.
-- **B.VI Per-observation bound.** For every observation served to consumers, the breaker's deviation check held at acceptance: under the recommended EMA metric, `|uₖ| ≤ k · σ̂ₖ₋₁` (Per-tick update). Alternative metrics MUST state their own per-observation bound explicitly.
+- **B.VI Per-observation bound.** For every observation served to consumers, the breaker's deviation check held at acceptance: under the recommended EWMA metric, `|δₖ| = |uₖ − μ̂ₖ₋₁| ≤ k · σ̂ₖ₋₁` (Per-tick update). Alternative metrics MUST state their own per-observation bound explicitly.
 - **B.VII Immutable breaker config.** Extends Invariant I: breaker configuration — deviation threshold, history window, staleness bound, scheduled-tick cadence, aggregator source — is fixed at construction. Changing any requires redeployment.
 
 **Timing:**
@@ -469,8 +476,8 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 - **Staleness bound.** Implementation-defined per source type; must satisfy T.I for the breaker's cadence.
 - **Spread metric and threshold for N5.** To be calibrated against source-disagreement noise.
 - **Breaker scheduled-tx cadence (`δ_cadence`).** Must satisfy T.I and T.II. Default TBD.
-- **Breaker EMA parameters** `T` (decay time constant) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
-- **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `T`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
+- **Breaker EWMA parameters** `τ_half` (half-life) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
+- **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `τ_half`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
 - **Exact mathematical formulas** for the breaker metric and aggregator remain open. The recommended defaults in this spec are a starting point; specific functional forms are subject to change during empirical calibration.
 - **Single-source failure policy.** At launch (N=2) the aggregator nils on any source failure — filtering to N=1 is indefensible. At mature (N≥3+ with median) we should shift to filter-and-quorum; MakerDAO Medianizer's `bar` parameter is the clearest precedent (minimum number of valid signed feeds required for a non-nil aggregate). Plan: bake in a minimum-quorum parameter now, set to `N` at launch, relax once we have enough sources for filtering to preserve Byzantine tolerance. Breaker does NOT trip on source failures — staleness pathway handles fail-closed.
 
