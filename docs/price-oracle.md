@@ -398,7 +398,7 @@ Per breaker:
 - `history: [PriceReading]` — **accepted observations only**. Serves consumers via `history.last`.
 - `prevObservation: PriceReading?` — **most recent observation** (whether accepted or tripped). Used as the base for each tick's return computation.
 - `μ̂` — running mean of Δt-normalized log returns.
-- `σ̂²` — running variance estimate (mean-corrected via West-style recurrence).
+- `σ̂²` — running variance estimate (mean-corrected via [West's weighted incremental algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_incremental_algorithm)).
 
 ### Per-tick update
 
