@@ -159,21 +159,28 @@ Sources publish new data; the scheduled update pokes on cadence; aggregator (or 
 
 **Flow:**
 
-```
-Time →
+```mermaid
+sequenceDiagram
+    participant S as Sources
+    participant T as Scheduled tick (Block N)
+    participant H as history
+    participant C as Consumer (Block N+k)
 
-Sources       ──[pub]──[pub]──[pub]──[pub]──→  (independent of FCM scheduler)
-                          │
-Block N            [scheduled tick — one atomic tx]
-                          │
-                  pull all sources (synchronous, read-only)
-                  filter (N3 staleness, N5 spread, Δ_max)
-                  aggregate
-                  variance update + trip eval
-                  append to history (if accepted)
-                          │
-Block N+k     [consumer reads price()]──→ returns history.last.value
-                                          (or nil if stale per N3)
+    Note over S: independent of FCM scheduler
+    S->>S: publish
+    S->>S: publish
+    S->>S: publish
+
+    Note over T: one atomic tx
+    T->>S: pull all (synchronous, read-only)
+    S-->>T: readings
+    T->>T: filter (N3 staleness, N5 spread, Δ_max)
+    T->>T: aggregate
+    T->>T: variance update + trip eval
+    T->>H: append (if accepted)
+
+    C->>H: price()
+    H-->>C: last accepted price (or nil if stale per N3)
 ```
 
 Composite latency from source publish to consumer-readable value is bounded as in [Composite bound](#invariants-and-timing-bounds).
