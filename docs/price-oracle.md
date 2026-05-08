@@ -157,6 +157,27 @@ Both arguments proceed by scenario walk.
 
 Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is axiomatic: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because `_history` is `access(self)` and mutated only by `executeTransaction`, never from `price()` (see B.III). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5 and the internal publish-time discipline (B.II), so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV).
 
+**Flow:**
+
+```
+Time →
+
+Sources       ──[pub]──[pub]──[pub]──[pub]──→  (independent of FCM scheduler)
+                          │
+Block N            [scheduled tick — one atomic tx]
+                          │
+                  pull all sources (synchronous, read-only)
+                  filter (N3 staleness, N5 spread, Δ_max)
+                  aggregate
+                  variance update + trip eval
+                  append to history (if accepted)
+                          │
+Block N+k     [consumer reads price()]──→ returns history.last.value
+                                          (or nil if stale per N3)
+```
+
+Composite latency from source publish to consumer-readable value is bounded as in [Composite bound](#invariants-and-timing-bounds).
+
 ### Scenario b — transient failure (source nil, spread spike, breaker trip)
 
 A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B.IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value (still within the staleness bound at acceptance). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T.IV). If the failure persists beyond the bound, `price()` returns nil until resolution. No consumer ever observes a value that violated the trip condition at acceptance time.
