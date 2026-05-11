@@ -143,7 +143,7 @@ Implementer guidance for achieving invariant II under a non-`view` `price()`: Im
 
 Cadence has no `try`/`catch`. A `price()` call that crosses into externally-controlled code (any source call) can panic and abort the caller's transaction; the platform offers no way to wrap it. This is not fixable at the implementer level.
 
-The only structurally panic-free `price()` is one that serves from local state. The circuit breaker does this: its `price()` reads `history.last` off a local resource; all source calls happen in `executeTransaction` (a separate scheduled tx), so upstream panics revert the tick, not the consumer.
+The only structurally panic-free `price()` is one that serves from local state. The circuit breaker does this: its `price()` reads `history.last` off a local resource; the upstream read happens in `executeTransaction` (a single scheduled tx that queries the wrapped aggregator), so any upstream panic reverts that tick, not the consumer's `price()`.
 
 Implementers of read-through oracles SHOULD use defensive access (nil-check `borrow()`, no force-unwraps, checked arithmetic) so their OWN code doesn't add panic surface on top of the upstream one. This is hygiene — fewer wasted scheduled ticks, cleaner diagnostics — not a safety guarantee.
 
