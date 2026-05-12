@@ -169,7 +169,7 @@ Both arguments proceed by scenario walk.
 
 ### Scenario a — nominal operation
 
-Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is axiomatic: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because breaker state is mutated only by `executeTransaction`, never from `price()` (see B.III). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5/I7, so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV); publish time propagates through (V).
+Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is type-enforced: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because breaker state is mutated only by `executeTransaction`, never from `price()` (see B.III). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5/I7, so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV); publish time propagates through (V).
 
 **Flow:**
 
