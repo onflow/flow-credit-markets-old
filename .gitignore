@@ -2,3 +2,7 @@
 emulator-account.pkey
 imports
 .env
+
+# ai tooling
+.claude
+ai-assisted-review
