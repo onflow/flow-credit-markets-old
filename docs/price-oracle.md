@@ -191,21 +191,31 @@ Each source datum carries an attested publish time (Pyth `publishTime`, BandOrac
 - **Safety.** Every non-nil price returned to a consumer satisfies invariants (I)–(V).
 - **Liveness.** Consumer queries return a non-nil price within the composite timing bound.
 
-Both arguments proceed by exhaustive scenario walk.
+The safety argument is structural and scenario-independent. The liveness argument is scenario-dependent and proceeds by exhaustive scenario walk.
 
-### Safety and Liveness under Scenario (a) — nominal operation
+### Safety (structural)
 
-Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is type-enforced: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because breaker state is mutated only by `executeTransaction`, never from `price()` (see B.III approach below). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5/I7, so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV); publish time propagates through (V).
-
-Sources publish new data; the scheduled update pokes on cadence; the aggregator (or breaker on top of it) records successful observations; consumer queries read `history.last` and receive non-nil prices. The invariants hold as follows:
+Invariants (I), (II), (IV), (V) hold in every reachable state by mechanism:
 
 - **(I)** type-enforced — `unitOfAccount` and `_token` are immutable `let` fields (Cadence guarantee).
 - **(II)** breaker state is mutated only by `executeTransaction`, never by `price()` (see B.III); satisfies I5.
-- **(III)** the scheduled update gates appends on N3/N5/I7, so any value reaching `history.last` has all Nil conditions negated at acceptance.
 - **(IV)** `current()` has only two paths: serve `history.last` (a real, gated reading) or return `nil`. No default-value path exists.
 - **(V)** `PriceReading.publishTime` is a `let` set at construction; the aggregator computes it as `min` over contributing sources; the breaker forwards it unchanged. Enforced by I7.
 
-**Flow:**
+Invariant (III), i.e. non-nil at query time `t` implies `¬N1 ∧ … ∧ ¬N5` at `t`, holds via two complementary gates:
+
+- **At acceptance** (per scheduled tick) — the update path enforces ¬N1, ¬N2, ¬N4, ¬N5, plus ¬N3 *as of acceptance*. The first four are *inherited* by the cached reading because they do not degrade with time.
+- **At query** — the breaker's staleness gate on `history.last` re-checks ¬N3 against the query instant. If the cached reading has aged past the staleness bound, `price()` returns `nil`; otherwise it serves `history.last`.
+
+Therefore any non-nil value returned to a consumer satisfies all five Nil Contract negations at the query instant. Safety follows for any compliant implementation, in any of the scenarios below.
+
+### Liveness (scenario walk)
+
+Liveness is scenario-dependent: whether `price()` returns non-nil within the composite bound depends on the operational state.
+
+#### Scenario (a) — nominal operation
+
+Sources publish new data; the scheduled update pokes on cadence; the aggregator (or breaker on top of it) records successful observations; consumer queries read `history.last` and receive non-nil prices.
 
 ```mermaid
 sequenceDiagram
@@ -235,19 +245,19 @@ sequenceDiagram
 
 Composite latency from source publish to consumer-readable value is bounded as in [Composite bound](#invariants-and-timing-bounds).
 
-### Safety and Liveness under Scenario (b) — transient failure (source nil, spread spike, breaker trip)
+#### Scenario (b) — transient failure (source nil, spread spike, breaker trip)
 
-A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B.IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value (still within the staleness bound at acceptance). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T.IV). If the failure persists beyond the bound, `price()` returns nil until resolution. No consumer ever observes a value that violated the trip condition at acceptance time.
+A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B.IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value — safe by the structural argument above (the acceptance-time gates ¬N1/¬N2/¬N4/¬N5 are inherited; the query-time gate re-checks ¬N3). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T.IV). If the failure persists beyond the bound, `price()` returns `nil` until resolution. By B.VI, no consumer ever observes a value that violated the trip condition at acceptance.
 
-### Safety and Liveness under Scenario (c) — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
+#### Scenario (c) — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
 
-Scheduled tx stops running (scheduler stall, operator action, bug). The most recent accepted observation is not refreshed. Once it ages past the staleness bound, `price()` returns nil via N3 (B.V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (per Storage and lifecycle teardown). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
+Scheduled tx stops running (scheduler stall, operator action, bug). The most recent accepted observation is not refreshed. Once it ages past the staleness bound, `price()` returns `nil` via N3 (B.V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns `nil` (per Storage and lifecycle teardown). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
 
-### Safety and Liveness und Scenario (d) — warm-up
+#### Scenario (d) — warm-up
 
-Before the first successful poke of a freshly-deployed breaker, `history` is empty. `price()` returns nil. No bootstrap value, no default. Consumers must tolerate the warm-up window between breaker creation and the first accepted observation.
+Before the first successful poke of a freshly-deployed breaker, `history` is empty. `price()` returns `nil`. No bootstrap value, no default. Consumers must tolerate the warm-up window between breaker creation and the first accepted observation.
 
-**Conclusion.** In all four scenarios, safety holds (no non-nil wrong value). Liveness holds trivially in scenario a, recovers automatically in b and d, and requires operator action in c. This matches the intended design: failures are transient by default, structural compromise is operator-escalated.
+**Conclusion.** Safety follows from the structural argument in every scenario. Liveness as stated holds in (a); recovers automatically within the staleness bound in (b) and (d); requires operator action in (c) — by design (Goal #4 + [Appendix: Safety over liveness](#appendix-safety-over-liveness-during-oracle-anomalies)). Failures are transient by default; structural compromise is operator-escalated.
 
 ## Extension: Gap Circuit Breaker
 
