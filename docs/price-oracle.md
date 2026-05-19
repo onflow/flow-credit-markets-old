@@ -41,7 +41,7 @@ The interface and the requirements on consumers (Caller Contract) are intended t
 
 *Parameters* (deployment-tunable):
 
-| Protocol Paramter  | Definition |
+| Protocol Parameter  | Definition |
 | :--- | :--- |
 | **Staleness bound** | Maximum age of the newest datum a returned price depends on. Measured against source publish time (I7). |
 | **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Bounded above by the staleness bound (T.I) and below by the breaker's history-window length (T.II). |
@@ -56,7 +56,7 @@ The spec makes the following axiomatic assumptions. If any is violated, the conc
 
 - **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
 - **Sources attest `publishTime` truthfully.** A source MUST report the actual moment its value was observed — not the query time, not the chain's current `block.timestamp`. If a source misreports `publishTime`, staleness checks (N3) are defeated. Staleness is anchored on source-attested `publishTime`, never `block.timestamp`; substituting the latter would launder pull-style stale data (e.g., a Pyth contract sitting unrefreshed) past the staleness check. Real-world clock drift between source-attested time and chain time is absorbed into staleness-bound calibration; suspiciously future-dated readings (buggy or adversarial source) are caught and surfaced as nil via N4.
-- **Majority-honest sources (Byzantine bound).** Across N≥3 sources (where N is the number of independent price sources configured for the token), strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 the bound permits zero compromised sources; aggregation provides no Byzantine tolerance.) As a last line of defense, the N5 spread check (below) detects source disagreement and returns `nil` — see [Appendix: Safety over liveness during oracle anomalies](#appendix-safety-over-liveness-during-oracle-anomalies).
+- **Majority-honest sources (Byzantine bound).** Across N≥3 sources (where N is the number of independent price sources configured for the token), strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 the bound permits zero compromised sources; aggregation provides no Byzantine tolerance.) As a last line of defense, the N5 spread check (below) detects source disagreement and returns `nil` — see [Appendix: Safety over liveness during oracle anomalies](#appendix-prioritizing-safety-over-liveness-during-oracle-anomalies).
 
 
 **Temporary Simplification (vMillions launch).** The launch milestone ships only one numeraire-denominated source plus a correlated DEX-derived sanity check. The DEX quote is not numeraire-denominated and is therefore not a proper price source under I1; it gates the precise feed via the [Gap Circuit Breaker](#extension-gap-circuit-breaker) and never contributes to the served value. Mature progression replaces this shape with the [Multi-Source Aggregator](#extension-multi-source-aggregator) over independent equally-reliable sources.
@@ -120,7 +120,7 @@ A compliant implementation maintains the following at all times.
 - **(I) Identity immutability.** `unitOfAccount` is a `let` field — type-enforced fixed at `init`, never mutates at runtime. The set of tokens the oracle is configured to price is also fixed at `init`. Changing either requires replacing the struct.
 - **(II) Query idempotence.** `price()` is not `view` — side effects are permitted. Repeated `price(ofToken: T)` within the same transaction MUST return the same result. Across two `price()` calls in the same block but different transactions, an implementation MAY return updated values if a state-mutating tx (e.g., the breaker's `executeTransaction`) commits between them; consumers requiring snapshot semantics MUST read once per operation (see C5 mitigation).
 - **(III) Reliability of non-nil.** A non-nil `price(ofToken: T)` at time `t` is returned only if no Nil Contract condition holds at `t`, i.e. `¬N1 ∧ … ∧ ¬N5`. (If a source panics, no value is returned; III is [vacuously satisfied](https://en.wikipedia.org/wiki/Vacuous_truth); see N2 panic caveat.)
-- **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero (see [Appendix: Safety over liveness during oracle anomalies](#appendix-safety-over-liveness-during-oracle-anomalies) for rationale).
+- **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero (see [Appendix: Safety over liveness during oracle anomalies](#appendix-prioritizing-safety-over-liveness-during-oracle-anomalies) for rationale).
 - **(V) Source publish-time propagation.** Source-attested `publishTime` values are propagated through aggregation and history without being relabeled with pull time, insertion time, or `block.timestamp`. Type-enforced by `PriceReading.publishTime` being a `let` field set at construction; downstream layers MUST forward it (single-source), take the `min` across contributing source publishTimes (aggregator), or pass through unchanged (breaker — serves the aggregator's reading as-is).
 
 ## Caller Contract
@@ -257,7 +257,7 @@ Scheduled tx stops running (scheduler stall, operator action, bug). The most rec
 
 Before the first successful poke of a freshly-deployed breaker, `history` is empty. `price()` returns `nil`. No bootstrap value, no default. Consumers must tolerate the warm-up window between breaker creation and the first accepted observation.
 
-**Conclusion.** Safety follows from the structural argument in every scenario. Liveness as stated holds in (a); recovers automatically within the staleness bound in (b) and (d); requires operator action in (c) — by design (Goal #4 + [Appendix: Safety over liveness](#appendix-safety-over-liveness-during-oracle-anomalies)). Failures are transient by default; structural compromise is operator-escalated.
+**Conclusion.** Safety follows from the structural argument in every scenario. Liveness as stated holds in (a); recovers automatically within the staleness bound in (b) and (d); requires operator action in (c) — by design (Goal #4 + [Appendix: Safety over liveness](#appendix-prioritizing-safety-over-liveness-during-oracle-anomalies)). Failures are transient by default; structural compromise is operator-escalated.
 
 ## Extension: Gap Circuit Breaker
 
