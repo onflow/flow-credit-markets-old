@@ -45,7 +45,8 @@ The interface and the requirements on consumers (Caller Contract) are intended t
 | :--- | :--- |
 | **Staleness bound** | Maximum age of the newest datum a returned price depends on. Measured against source publish time (I7). |
 | **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Bounded above by the staleness bound (T.I) and below by the breaker's history-window length (T.II). |
-| **Δ_max** | Maximum allowed source-time spread within a single aggregator tick: if the newest and oldest contributing source observation times differ by more than `Δ_max`, the aggregator MUST reject the tick and return `nil`. Formal definition: see [Source-time spread](#source-time-spread). |
+| **Δ_max** | Maximum allowed source-*time* spread within a single aggregator tick: if the newest and oldest contributing source observation times differ by more than `Δ_max`, the aggregator MUST reject the tick and return `nil`. Distinct from `spreadThreshold`, which bounds value spread. Formal definition: see [Source-time spread](#source-time-spread). |
+| **spreadThreshold** | Aggregator-specific: maximum allowed spread between non-nil source *values* within a single tick. If the spread of source-reported prices exceeds `spreadThreshold`, the aggregator MUST reject the tick and return `nil` (N5). Distinct from `Δ_max`, which bounds time spread. The precise spread metric is an open question — see [Open Questions](#open-questions). |
 | **σ_scheduler** | Scheduler-slack bound: worst-case excess of actual inter-tick delay over `δ_cadence` (composite-bound term; environmental, not tuned). |
 | **ε_skew** | Bound on skew between source-attested `publishTime` and on-chain block time (composite-bound term; see Assumptions). |
 
@@ -75,34 +76,40 @@ access(all) struct interface PriceOracle {
 }
 ```
 
-The interface is part of this spec; implementations MUST NOT add methods returning a price without the full safety contract.
+The interface is part of this spec; all implementations provide the following guarantees and limitations to the caller.
 
-- `unitOfAccount` — set at `init`. Single source of truth for the oracle's unit of account; used for the registration handshake (C3). Immutable (`let` field) throughout the struct's lifetime (invariant I). 
-- `price(ofToken)` — the oracle's read method. Properties:
-  - **Return contract.** Returns non-nil only if every condition in the [Nil Contract](#nil-contract) holds. An unsupported `ofToken` returns `nil` as per (N1).
-  - **Panic behavior is implementation-dependent.** *Read-through* implementations (single-source, aggregator) can propagate upstream panics; this is irreducible at the platform level (see I6). *Breaker-wrapped* implementations serve from local state and are structurally panic-free. Caller responsibilities: see C6.
-  - **Side effects allowed (not `view`).** Implementations may refresh a cache on demand, pull from a price source, or transact cross into Flow EVM (e.g., to trigger a Pyth update). Side effects MUST NOT alter future observations — see invariant II.
+- `unitOfAccount` — Single source of truth for the oracle's unit of account; used for the registration handshake (C2). Set at `init` and immutable (`let` field) throughout the oracle's lifetime (invariant I).
+- **`price(ofToken)`** — the oracle's read method.
+  - **Return contract.** Returns a non-nil `PriceReading` only if every condition in the [Nil Contract](#nil-contract) holds. An unsupported `ofToken` returns `nil` (N1); not a panic.
+  - **May panic.** `price()` can panic in some implementations — Cadence has no `try`/`catch`, so an upstream panic aborts your transaction (see C5 below for details).
+  - **Not `view`.** Repeated calls in the same transaction return the same value (invariant II). Oracle calls from different transactions within the same block may return different prices (see I5).
 
-**`PriceReading` is the only way to observe a price.** `value` and `publishTime` are bundled in one atomic return so callers cannot observe one without the other. The interface MUST NOT offer a separate `publishTimeOf(token: Type)` getter — a two-call pattern reintroduces a race between the reads and defeats (I7).
+**`PriceReading` is the _only_ way to observe a price.** `value` and `publishTime` are bundled in one atomic return so _callers cannot observe one without the other_.
 
-- `value` — price denominated in `unitOfAccount` per one token, at `publishTime`.
-- `publishTime` — source-attested observation time (I7). For aggregators, the oldest contributing source's publishTime (min-semantics); for breakers, the publishTime of the last accepted observation, unchanged.
+- `value` — price at `publishTime`; denominated in `unitOfAccount` per one `ofToken`.
+- `publishTime` — source-attested observation time of the data this reading reflects (I7).
+
 
 ## Semantics
 
 ### Unit of account [UoA]
 
-A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<USD>()`, defined in [Numeraire spec](./Numeraire.md)). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C3 below), not at query time.
+A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single token of type `T`, at the oracle's current time. For FCM, UoA is always the Numeraire (currently real-world USD represented by `Type<USD>()`, defined in [Numeraire spec](./Numeraire.md)). UoA is a type, not a string, because we want the compiler to reject cross-unit mismatches at registration (see C2 below), not at query time.
 
 ### Nil Contract
 
 `price()` returns `nil` when the oracle can't produce a price the caller should rely on. Every implementation MUST return `nil` in at least:
 
 - **N1 — Unsupported token.** The oracle is not configured to price `ofToken`.
-- **N2 — Source unavailability.** Any required source returns nil, is missing the expected datum, or schema-mismatches. Source panics during the call are irreducible (see I6) and propagate as tx revert; the aggregator MUST structure its code to minimize additional panic surface. No silent fallback to zero / default / stale.
+- **N2 — Source unavailability.** Any required source returns nil, is missing the expected datum, or schema mismatch (fails ABI decoding — applicable to EVM-bridged sources where return data is untyped bytes). No silent fallback to zero, default, or stale value.
+
+  *Panic caveat:* If a source *panics* rather than returning nil, Cadence has no mechanism to catch it — the caller's transaction aborts. This is an exception to the N2 rule 
+  that simplifies Oracle implementation (see I6), but requires 
+  caller awareness (see C5 for details).
 - **N3 — Staleness.** The newest underlying datum's source-attested `publishTime` is older than the implementation's staleness bound.
 - **N4 — Internal inconsistency.** Overflow, unexpected zero, schema mismatch, invalid configuration.
-- **N5 — Source disagreement** (multi-source only). Spread across non-nil source values at a single tick exceeds the configured threshold (intra-tick; aggregator does not maintain a spread history).
+- **N5 — Source disagreement** (multi-source only). Spread across non-nil source values at a single tick exceeds `spreadThreshold` (intra-tick; the aggregator does not maintain a spread history).
+
 
 `nil` is a normal return, not an error. Implementations MUST surface these conditions as `nil` rather than panic; the panic-freedom of `price()` itself is implementation-dependent per I6 (read-through implementations may still propagate upstream panics).
 
@@ -111,21 +118,25 @@ A non-nil `price(ofToken: T)` is the value denominated in the UoA of a single to
 A compliant implementation maintains the following at all times.
 
 - **(I) Identity immutability.** `unitOfAccount` is a `let` field — type-enforced fixed at `init`, never mutates at runtime. The set of tokens the oracle is configured to price is also fixed at `init`. Changing either requires replacing the struct.
-- **(II) Query idempotence.** `price()` is not `view` — side effects are permitted. Repeated `price(ofToken: T)` within the same transaction MUST return the same result. Across two `price()` calls in the same block but different transactions, an implementation MAY return updated values if a state-mutating tx (e.g., the breaker's `executeTransaction`) commits between them; consumers requiring snapshot semantics MUST read once per operation (C5).
-- **(III) Reliability of non-nil.** A non-nil `price(ofToken: T)` at time `t` is returned only if no Nil Contract condition holds at `t` — i.e., `¬N1 ∧ … ∧ ¬N5`.
-- **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero.
-- **(V) Source publish-time propagation.** Source-attested `publishTime` values are propagated through aggregation and history without being relabeled with pull time, insertion time, or `block.timestamp`. Type-enforced by `PriceReading.publishTime` being a `let` field set at construction; downstream layers MUST forward it (single-source) or take the `min` across contributing source publishTimes (aggregator).
+- **(II) Query idempotence.** `price()` is not `view` — side effects are permitted. Repeated `price(ofToken: T)` within the same transaction MUST return the same result. Across two `price()` calls in the same block but different transactions, an implementation MAY return updated values if a state-mutating tx (e.g., the breaker's `executeTransaction`) commits between them; consumers requiring snapshot semantics MUST read once per operation (see C5 mitigation).
+- **(III) Reliability of non-nil.** A non-nil `price(ofToken: T)` at time `t` is returned only if no Nil Contract condition holds at `t`, i.e. `¬N1 ∧ … ∧ ¬N5`. (If a source panics, no value is returned; III is [vacuously satisfied](https://en.wikipedia.org/wiki/Vacuous_truth); see N2 panic caveat.)
+- **(IV) No silent substitution.** Non-nil values are freshly computed from sources whose attested publish time is within the staleness bound. Never a default, a cached-last-known-good past bound, or a zero (see [Appendix: Safety over liveness during oracle anomalies](#appendix-safety-over-liveness-during-oracle-anomalies) for rationale).
+- **(V) Source publish-time propagation.** Source-attested `publishTime` values are propagated through aggregation and history without being relabeled with pull time, insertion time, or `block.timestamp`. Type-enforced by `PriceReading.publishTime` being a `let` field set at construction; downstream layers MUST forward it (single-source), take the `min` across contributing source publishTimes (aggregator), or pass through unchanged (breaker — serves the aggregator's reading as-is).
 
 ## Caller Contract
 
 Consumers of `price(ofToken: T)`:
 
 - **C1 — Treat `nil` as a hard stop.** Every decision that depends on the price MUST abort or defer. No substituting a default, stale cache, or last-known-good.
-- **C2 — Respect the unit of account.** Returned `UFix64` is in `unitOfAccount` units (by convention the Numeraire). Different-unit conversions are the caller's responsibility.
-- **C3 — Verify UoA before first use.** Callers MUST verify, before the oracle is used for the first time (typically at wire-up / registration), that the oracle's `unitOfAccount` is compatible with the unit they expect. By convention, FCM oracles report in the protocol numeraire (currently `Type<USD>()`, see [Numeraire spec](./Numeraire.md)), and FCM consumers realize this check as strict type equality: `assert(oracle.unitOfAccount == Type<USD>(), message: "UoA mismatch")`. Type-enforced constancy via the `let unitOfAccount` field (invariant I) means a single check before first use is sufficient — re-checking per query is not required.
-- **C4 — Assume non-determinism across blocks.** `price()` may return different values across blocks. No reliance on monotonicity or bounded rate-of-change. Same-transaction repeats DO return the same value (invariant II), so caching within a single transaction is safe; caching across transactions — even within the same block — is not, since a scheduled state-mutating tx (e.g., the breaker's `executeTransaction`) can interleave. If bounded rate-of-change is needed, wrap the oracle (Extension: Volatility Circuit Breaker).
-- **C5 — Read once per operation.** "Operation" = one logical decision (a single position's liquidation check, a single Net Asset Value [NAV] snapshot). Read `price()` once at the start of the operation and use the value throughout. Don't re-read inside loops. For operations that span multiple tokens (basket NAV), read each token's oracle once and treat any nil as all-nil (C1 hard stop applied to the whole basket).
-- **C6 — Panic awareness.** A read-through `price()` (e.g., a single-source oracle reaching an external contract) can panic — Cadence cannot catch it; the caller's transaction aborts (see I6). Callers MUST confine reads from such oracles to contexts where transaction abort is acceptable (not batch liquidation; not multi-token NAV where one panic reverts everything). Breaker-wrapped oracles are structurally panic-free and not subject to this restriction.
+- **C2 — Verify UoA before first use.** Callers MUST verify, before the oracle is used for the first time (typically at wire-up / registration), that the oracle's `unitOfAccount` is compatible with the unit they expect. By convention, FCM oracles report in the protocol numeraire (currently `Type<USD>()`, see [Numeraire spec](./Numeraire.md)), and FCM consumers realize this check as strict type equality: `assert(oracle.unitOfAccount == Type<USD>(), message: "UoA mismatch")`. Type-enforced constancy via the `let unitOfAccount` field (invariant I) means a single check before first use is sufficient — re-checking per query is not required.
+- **C3 — Respect the unit of account.** Returned `UFix64` is in `unitOfAccount` units (by convention the Numeraire). Different-unit conversions are the caller's responsibility.
+- **C4 — Assume different price returns in different transactions.** Consecutive price() calls within the same transaction are guaranteed to return the same value (invariant II), so caching within a single transaction is safe. Caching across transactions (even within the same block) is not safe, since a scheduled state-mutating tx (e.g., the breaker's `executeTransaction`) can interleave. 
+- **C5 — Panic awareness.** A read-through `price()` (e.g., a single-source oracle reaching an external contract) can panic — Cadence cannot catch it; the caller's transaction aborts (see I6). Callers MUST confine reads from such oracles to contexts where transaction abort is acceptable (not batch liquidation; not multi-token NAV where one panic reverts everything). Breaker-wrapped oracles are structurally panic-free (details below) and hence not subject to this restriction.
+
+  *Mitigation: read once, cache locally.* For each token in an operation, call `price()` exactly once at the start and use the cached value throughout. This minimizes panic exposure to a single call site per token. For multi-token operations (basket NAV), read all token prices before acting;   if any single token's `price()` returns `nil`, treat the entire basket as having no reliable price (C1 hard stop applied to the whole basket).
+
+
+  
 
 ## Implementer Requirements
 
@@ -133,9 +144,9 @@ Consumers of `price(ofToken: T)`:
 
 The mature protocol requires ≥ 2 **independent** sources, with at least one source that is not derived from on-chain liquidity (e.g., Pyth or BandOracle, the two signed off-chain feeds currently available on Flow). A single source — or multiple sources all sharing a failure mode (e.g., all DEX-spot) — can be stale, frozen, or manipulated with no meaningful cross-check; this limitation cannot be fixed by tuning parameters.
 
-**Axiom:** Some sources might produce `nil` return values, or the oracle might reject some non-nil source prices as outliers or for other reasons (i.e., treat those functionally equivalent to `nil`). We require that strictly less than ⌈N/2⌉ of the configured sources produce `nil`, results that are rejected, or significantly inaccurate results.
+**Axiom:** Some sources might produce `nil` return values, or the oracle might reject some non-nil source prices as outliers or for other reasons (i.e., treat those functionally equivalent to `nil`). We require that strictly less than N/2 of the N configured sources produce `nil`, results that are rejected, or significantly inaccurate results.
 
-*Aggregation ≠ dynamic oracle selection.* Actively selecting oracles (picking among a larger group of available sources based on freshness / deviation) is a disguised fallback chain and explicitly out of scope — distinct from aggregation.
+*Aggregation ≠ dynamic oracle selection.* Actively selecting oracles (picking among a larger group of available sources based on freshness / deviation) is an adaptive data selection approach (out of scope) and distinct from aggregating value from fixed set of sources (in scope).
 
 ### I2 — No stale-as-fresh.
 
@@ -161,7 +172,7 @@ The only structurally panic-free `price()` is one that serves from local state. 
 
 Implementers of read-through oracles SHOULD use defensive access (nil-check `borrow()`, no force-unwraps, checked arithmetic) so their OWN code doesn't add panic surface on top of the upstream one. This is hygiene — fewer wasted scheduled ticks, cleaner diagnostics — not a safety guarantee.
 
-Consumer responsibility: see C6.
+Consumer responsibility: see C5.
 
 ### I7 — Honor source publish time; never relabel.
 
@@ -169,21 +180,30 @@ Each source datum carries an attested publish time (Pyth `publishTime`, BandOrac
 
 ## Authorities
 
-- **Query path** — any caller. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — same-transaction repeats return the same value (cross-tx same-block reads may diverge if a scheduled state-mutating tx interleaves).
+- **Query path** — any caller. `price()` is non-`view` (to allow event emission, lazy-refresh patterns, and EVM-side operations — e.g., triggering a Pyth price update on Flow EVM) but bound by invariant II — repeated calls within the same transaction return the same value (cross-tx same-block reads may diverge if a scheduled state-mutating tx interleaves).
 - **Scheduled-tx entitlement** — scoped to the circuit breaker's `CircuitBreaker.executeTransaction` (called by `FlowTransactionScheduler`). Not callable by public traffic.
 - **Deployment** — creating, wiring, and retiring oracles at the protocol layer is outside this interface. Deployed oracles are immutable (invariant I); any change requires recreation.
 
 ## Safety and Liveness
 
-Goal:
-- For **safety**, we need to show that under normal operations with the scheduled updates running and at least the minimal number of healthy sources, consumer produces the correct price (i.e. satisfying implementer requirements (I1) - (I7)).
-- For **liveness**, under nominal operation (sources healthy, scheduler running), consumer queries return a non-nil reliable price within the composite bound.
+**Theorem.** An implementation satisfying (I1)–(I7), with scheduled updates running and at least the required number of sources providing healthy and timely values, provides:
 
-Both arguments proceed by scenario walk.
+- **Safety.** Every non-nil price returned to a consumer satisfies invariants (I)–(V).
+- **Liveness.** Consumer queries return a non-nil price within the composite timing bound.
 
-### Scenario a — nominal operation
+Both arguments proceed by exhaustive scenario walk.
 
-Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is type-enforced: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because breaker state is mutated only by `executeTransaction`, never from `price()` (see B.III). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5/I7, so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV); publish time propagates through (V).
+### Safety and Liveness under Scenario (a) — nominal operation
+
+Sources publish new data; the scheduled update pokes on cadence; aggregator (or breaker on top of aggregator) records successful observations; consumer queries read `history.last` and receive non-nil prices. (I) is type-enforced: `unitOfAccount` and `_token` are immutable `let` fields. (II) holds because breaker state is mutated only by `executeTransaction`, never from `price()` (see B.III approach below). (III) and (IV) hold by *check*: the scheduled update gates appends on N3/N5/I7, so non-nil implies all Nil conditions are negated; substitution is forbidden by the no-default rule (IV); publish time propagates through (V).
+
+Sources publish new data; the scheduled update pokes on cadence; the aggregator (or breaker on top of it) records successful observations; consumer queries read `history.last` and receive non-nil prices. The invariants hold as follows:
+
+- **(I)** type-enforced — `unitOfAccount` and `_token` are immutable `let` fields (Cadence guarantee).
+- **(II)** breaker state is mutated only by `executeTransaction`, never by `price()` (see B.III); satisfies I5.
+- **(III)** the scheduled update gates appends on N3/N5/I7, so any value reaching `history.last` has all Nil conditions negated at acceptance.
+- **(IV)** `current()` has only two paths: serve `history.last` (a real, gated reading) or return `nil`. No default-value path exists.
+- **(V)** `PriceReading.publishTime` is a `let` set at construction; the aggregator computes it as `min` over contributing sources; the breaker forwards it unchanged. Enforced by I7.
 
 **Flow:**
 
@@ -215,15 +235,15 @@ sequenceDiagram
 
 Composite latency from source publish to consumer-readable value is bounded as in [Composite bound](#invariants-and-timing-bounds).
 
-### Scenario b — transient failure (source nil, spread spike, breaker trip)
+### Safety and Liveness under Scenario (b) — transient failure (source nil, spread spike, breaker trip)
 
 A source drops, sources diverge, or the current observation deviates past the breaker's threshold. The scheduled poke fails → `history` is **not** appended (B.IV atomic per-tick). The previous tail entry remains until it ages out via N3; during that window, consumers see the last accepted value (still within the staleness bound at acceptance). If the failure resolves within the staleness bound, the next successful poke appends — automatic recovery (T.IV). If the failure persists beyond the bound, `price()` returns nil until resolution. No consumer ever observes a value that violated the trip condition at acceptance time.
 
-### Scenario c — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
+### Safety and Liveness under Scenario (c) — persistent failure (scheduler stall, state-resource destroyed, source permanently compromised)
 
 Scheduled tx stops running (scheduler stall, operator action, bug). The most recent accepted observation is not refreshed. Once it ages past the staleness bound, `price()` returns nil via N3 (B.V + T.I). If `CircuitBreaker` is destroyed, the capability borrow returns nil and `price()` returns nil (per Storage and lifecycle teardown). Consumers fail closed. Recovery requires operator intervention (restart scheduler, redeploy state, swap sources).
 
-### Scenario d — warm-up
+### Safety and Liveness und Scenario (d) — warm-up
 
 Before the first successful poke of a freshly-deployed breaker, `history` is empty. `price()` returns nil. No bootstrap value, no default. Consumers must tolerate the warm-up window between breaker creation and the first accepted observation.
 
@@ -249,14 +269,14 @@ access(all) struct AggregatorOracle: PriceOracle {
     access(all) let unitOfAccount: Type
     access(self) let _token: Type
     access(self) let _sources: [{PriceOracle}]
-    // plus config for staleness (N3), spread (N5), aggregation
+    // plus config for staleness (N3), spreadThreshold (N5), Δ_max (source-time spread), aggregation
 
     access(all) fun price(ofToken: Type): PriceReading? {
         if ofToken != self._token { return nil }
         // 1. Pull PriceReading from each source (borrow-checked, no force-unwraps per I6).
         // 2. For each source: treat as nil if reading is nil OR publishTime older than staleness bound.
         //    Aggregated → N2 nil ONLY if too many sources nil/stale (filter-and-quorum).
-        // 3. Spread across non-nil source values at this tick > threshold → N5 nil.
+        // 3. Spread across non-nil source values at this tick > spreadThreshold → N5 nil.
         // 4. Apply aggregation function (e.g. median or mean) to non-nil source values.
         // 5. Return PriceReading(value: aggregate, publishTime: min(contributing source publishTimes)).
         return nil  // placeholder
@@ -266,9 +286,9 @@ access(all) struct AggregatorOracle: PriceOracle {
 
 ### Outlook on aggregation function for more mature product versions
 
-Open question (Open Questions). Candidates:
+The choice of aggregation function is an open question (see [Open Questions](#open-questions)). Candidates considered:
 
-- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds adopted at launch), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is load-bearing — it IS the outlier defense. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N); appropriate for launch given our source count.
+- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds adopted at launch), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is the **sole outlier defense** — there is no robust-averaging fallback for N=2 that can produce a non-nil value in presence of a price source fault. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N); appropriate for launch given our source count.
 - **Median** — Byzantine-robust to `(N−1)/2` compromised feeds; meaningful only at N≥3. Used by MakerDAO Medianizer, Chainlink OCR (Data Feeds), and Band Protocol. Caution: expensive to compute on-chain. A robust default once we can onboard additional independent sources (DEX-derived, additional bridges) — research item for mature launch.
 - **Weighted median** — per-source weights, typically inverse of stated confidence. Used by Pyth Network across its publishers. Not viable at FCM launch because only Pyth publishes confidence on Flow; BandOracle and DEX sources don't. Possible later if we standardize confidence across adopted sources. Research item for mature launch.
 - The **Geometric Mean** would be a viable candidate to consider here, because the geometric mean dampens extreme outliers compared to the arithmetic mean. (For this reason Uniswap V3 uses the geometric mean too, but in a different context).
@@ -340,14 +360,11 @@ access(all) resource CircuitBreaker: FlowTransactionScheduler.TransactionHandler
     fun executeTransaction(id: UInt64, data: AnyStruct?) {
         // 1. Pull (pₖ, τₖ) from self._upstream.price(ofToken: self._token).
         //    If reading is nil → no-op this tick.
-        // 1a. If self._prevObservation is non-nil and τₖ ≤ self._prevObservation.publishTime
-        //     → no-op this tick. Aggregator min-semantics across a fluctuating
-        //     contributing-source set can yield a non-monotone τₖ; Δτ ≤ 0 would
-        //     break √Δτ in step 3 (undefined) and produce a non-positive
-        //     Δτ/τ_half exponent in step 5, yielding αₖ ≤ 0 — collapsing the
-        //     update at Δτ = 0 and inverting it at Δτ < 0.
-        //     Skipping is consistent with B.IV (atomic per-tick: commit all or
-        //     nothing) and T.III (no-op on non-advancing publish time).
+        // 1a. Enforce strict publish-time monotonicity (T.III): if self._prevObservation
+        //     is non-nil and τₖ ≤ self._prevObservation.publishTime, no-op this tick.
+        //     (Aggregator min-semantics across a fluctuating contributing-source set
+        //     can yield a non-monotone τₖ.) Skipping is consistent with B.IV (atomic
+        //     per-tick: commit all or nothing). For T.III and B.IV see following sections.
         // 2. If self._prevObservation is nil (warm-up) → set it, skip σ̂²/trip eval.
         // 3. Compute uₖ = log(pₖ / prev.value) / √(τₖ − prev.publishTime); δₖ = uₖ − self._meanReturn.
         // 4. Evaluate trip: |δₖ| > k · sqrt(self._sigmaSquared) ?
@@ -457,8 +474,8 @@ Alternative metrics remain open.
 
 ```
 p⁽ᵏ⁾  =  g({vᵢ⁽ᵏ⁾})                              (aggregation function — median / mean / etc.)
-τ⁽ᵏ⁾  =  minᵢ tᵢ⁽ᵏ⁾                              (conservative staleness bound — Invariant V)
-Δ⁽ᵏ⁾  =  maxᵢ tᵢ⁽ᵏ⁾  −  minᵢ tᵢ⁽ᵏ⁾   ≥  0        (intra-aggregate source-time spread)
+τ⁽ᵏ⁾  =  minᵢ(tᵢ⁽ᵏ⁾)                             (conservative staleness bound — Invariant V)
+Δ⁽ᵏ⁾  =  maxᵢ( tᵢ⁽ᵏ⁾)  −  minᵢ(tᵢ⁽ᵏ⁾) ≥ 0        (intra-aggregate source-time spread)
 ```
 
 The aggregate's value `p⁽ᵏ⁾` is computed from measurements taken over the interval `[τ⁽ᵏ⁾, τ⁽ᵏ⁾ + Δ⁽ᵏ⁾]` — it is *not* a point sample at `τ⁽ᵏ⁾`.
@@ -478,7 +495,7 @@ The recommended default metric (see Metric shape, below) is valid under this bou
 ### Invariants and timing bounds
 
 - **B.I Fail-closed on trip.** When a deviation check rejects an observation, breaker state is unchanged. Consumers continue to see the previously-accepted value until it ages past the staleness bound (N3). Trip signalling to off-chain monitoring is covered by I3.
-- **B.II Publish-time discipline.** Specialization of Invariant V: every observation recorded by the breaker carries a source-attested `publishTime`, never relabeled with pull-time, insertion-time, or `block.timestamp`.
+- **B.II Publish-time discipline.** Specialization of Invariant V. The breaker does not synthesize a `publishTime`: every observation it records and serves carries the upstream's `PriceReading.publishTime` propagated unchanged. In the documented architecture (breaker wraps aggregator), that resolves to `min(publishTime)` over the aggregator's contributing source readings at that tick (Aggregator sketch step 5). Never relabeled with the tick's execution time, `block.timestamp`, or any timestamp computed at acceptance.
 - **B.III Query idempotence.** Specialization of Invariant II / I5: consumer reads cannot mutate breaker state; state mutation is restricted to the scheduled-tick context. Same-transaction reads return the same value; same-block reads across different transactions return the same value unless a scheduled `executeTransaction` interleaves.
 - **B.IV Atomic per-tick update.** Each scheduled tick either commits its state transition — new observation, any pruning — in full, or commits nothing. No partial states.
 - **B.V History monotonic and window-bounded.** The internal observation log is strictly increasing in `publishTime`; retained entries lie within a configured window ending at the most recent observation.
@@ -489,7 +506,7 @@ The recommended default metric (see Metric shape, below) is valid under this bou
 
 - **T.I** `δ_cadence < stalenessBound`. Otherwise `history.last` ages past the staleness bound between ticks even under nominal operation. Scheduler stalls cause N3 nil — fail-closed on outage.
 - **T.II** `historyWindow ≥ K · δ_cadence` for `K ≥ 2`, where `K` is the integer factor expressing how many cadence periods the breaker's history window spans. K = 2 is the structural floor — deviation is undefined with a single observation. Practical K is metric-dependent and open (see Metric shape).
-- **T.III Event-driven.** Trip evaluation and state update only on strict publish-time advance (τₖ > τₖ₋₁). Ticks where τₖ ≤ τₖ₋₁ — same-time pokes, or non-monotone aggregator publish times produced by a fluctuating contributing-source set under min-semantics — are no-ops. This guards `√Δτ` and the EWMA weight αₖ in the per-tick update. Trip behavior MUST NOT depend on regular tick cadence; the per-tick update math depends only on the strict publish-time advance above, not on inter-tick spacing (whether ticks are delayed, skipped, or arrive in rapid succession).
+- **T.III Event-driven.** Trip evaluation and state update only on strict publish-time advance (τₖ > τₖ₋₁). Ticks where τₖ ≤ τₖ₋₁ are no-ops; this includes same-time pokes and non-monotone aggregator publish times produced by a fluctuating contributing-source set under min-semantics. The strict-advance condition guards `√Δτ` and the EWMA weight αₖ in the per-tick update. Trip evaluation MUST NOT assume regular tick spacing. The per-tick update math depends on the publish-time gap `τₖ − τₖ₋₁`, not on the inter-tick scheduling interval. Ticks may be delayed, skipped, or arrive in rapid succession without affecting correctness.
 - **T.IV Automatic recovery.** No persistent "broken" flag. Next non-tripping observation appends to `history` and advances the served reading. Transient failures resolve automatically; structural compromise escalates to operator intervention (different from Liquity's persistent-break model).
 
 **Composite bound (end-to-end):** for every non-nil `p` returned at wall-clock `t` with source publish time `τ`:
@@ -511,7 +528,7 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 
 - **Catalog of acceptable source pairings** — which count as "independent" under I1, under what market assumptions. Research before mature launch.
 - **Staleness bound.** Implementation-defined per source type; must satisfy T.I for the breaker's cadence.
-- **Spread metric and threshold for N5.** To be calibrated against source-disagreement noise.
+- **Spread metric and `spreadThreshold` value for N5.** Precise metric form (e.g., max−min, max/min ratio, std-dev across sources) is unspecified; both the metric and the calibrated threshold value to be settled against source-disagreement noise.
 - **Breaker scheduled-tx cadence (`δ_cadence`).** Must satisfy T.I and T.II. Default TBD.
 - **Breaker EWMA parameters** `τ_half` (half-life) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
 - **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `τ_half`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
@@ -527,7 +544,7 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 
 Deliberate acknowledgments where the spec's safety model has honest gaps.
 
-- **Capability-swap with matching UoA.** A consumer's stored capability can be re-bound to a different oracle after the C3 registration-time check; a swap to an oracle with the same UoA (e.g., WETH/USD → WBTC/USD) goes undetected. The `let unitOfAccount` field rules out a single oracle changing its own UoA — not capability-level swaps. Future mitigation: pin source identity at registration and re-verify per use.
+- **Capability-swap with matching UoA.** A consumer's stored capability can be re-bound to a different oracle after the C2 registration-time check; a swap to an oracle with the same UoA (e.g., WETH/USD → WBTC/USD) goes undetected. The `let unitOfAccount` field rules out a single oracle changing its own UoA — not capability-level swaps. Future mitigation: pin source identity at registration and re-verify per use.
 
 ## Appendix: Prioritizing Safety over liveness during oracle anomalies
 
