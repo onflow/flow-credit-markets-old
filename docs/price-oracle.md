@@ -46,7 +46,7 @@ The interface and the requirements on consumers (Caller Contract) are intended t
 | **Staleness bound** | Maximum age of the newest datum a returned price depends on. Measured against source publish time (I7). |
 | **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Bounded above by the staleness bound (T.I) and below by the breaker's history-window length (T.II). |
 | **Δ_max** | Maximum allowed source-*time* spread within a single aggregator tick: if the newest and oldest contributing source observation times differ by more than `Δ_max`, the aggregator MUST reject the tick and return `nil`. Distinct from `spreadThreshold`, which bounds value spread. Formal definition: see [Source-time spread](#source-time-spread). |
-| **spreadThreshold** | Aggregator-specific: maximum allowed spread between non-nil source *values* within a single tick. If the spread of source-reported prices exceeds `spreadThreshold`, the aggregator MUST reject the tick and return `nil` (N5). Distinct from `Δ_max`, which bounds time spread. The precise spread metric is an open question — see [Open Questions](#open-questions). |
+| **spreadThreshold** | Maximum allowed spread between non-nil source *values* within a single tick. Used by both the [Multi-Source Aggregator](#extension-multi-source-aggregator) (N-way spread, N5) and the [Gap Circuit Breaker](#extension-gap-circuit-breaker) ( `| A.value − B.value| `, the launch shape`). MUST return `nil` (N5) on exceedance. Distinct from `Δ_max` (time spread). Calibration drivers differ between the two contexts — see each section. The precise N-way metric for the multi-source aggregator is an [Open Question](#open-questions). |
 | **σ_scheduler** | Scheduler-slack bound: worst-case excess of actual inter-tick delay over `δ_cadence` (composite-bound term; environmental, not tuned). |
 | **ε_skew** | Bound on skew between source-attested `publishTime` and on-chain block time (composite-bound term; see Assumptions). |
 
@@ -59,7 +59,7 @@ The spec makes the following axiomatic assumptions. If any is violated, the conc
 - **Majority-honest sources (Byzantine bound).** Across N≥3 sources (where N is the number of independent price sources configured for the token), strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 the bound permits zero compromised sources; aggregation provides no Byzantine tolerance.) As a last line of defense, the N5 spread check (below) detects source disagreement and returns `nil` — see [Appendix: Safety over liveness during oracle anomalies](#appendix-safety-over-liveness-during-oracle-anomalies).
 
 
-**Temporary Simplification:** For the product milestone "Rebuild V0.2", we will not satisfy these axioms fully. Specifically, we will only have one true price source denominated in the numeraire. A DEX is used as a secondary price source. However, a DEX will typically not report the prices in the numeraire so prices have to be approximately converted, for which reason the DEX should not be considered a proper price source. We will use the DEX as an input to the Circuit Breaker (discussed below), but not incorporate its potentially imprecise output signal on the happy path in the "price-of-truth".
+**Temporary Simplification (vMillions launch).** The launch milestone ships only one numeraire-denominated source plus a correlated DEX-derived sanity check. The DEX quote is not numeraire-denominated and is therefore not a proper price source under I1; it gates the precise feed via the [Gap Circuit Breaker](#extension-gap-circuit-breaker) and never contributes to the served value. Mature progression replaces this shape with the [Multi-Source Aggregator](#extension-multi-source-aggregator) over independent equally-reliable sources.
 
 
 ## Interface
@@ -249,9 +249,60 @@ Before the first successful poke of a freshly-deployed breaker, `history` is emp
 
 **Conclusion.** In all four scenarios, safety holds (no non-nil wrong value). Liveness holds trivially in scenario a, recovers automatically in b and d, and requires operator action in c. This matches the intended design: failures are transient by default, structural compromise is operator-escalated.
 
+## Extension: Gap Circuit Breaker
+
+**Minimal launch shape for product milestone vMillions.** Two-source layer with asymmetric roles: a precise numeraire-denominated feed provides the value; a correlated second source cross-checks it. If the two disagree by more than `spreadThreshold`, return `nil`. Composes with the `PriceOracle` interface like any other layer; superseded by the [Multi-Source Aggregator](#extension-multi-source-aggregator) (+ optional [Volatility Circuit Breaker](#extension-volatility-circuit-breaker)) in the mature protocol.
+
+**Why a minimal shape.** vMillions cannot wait for two independent numeraire-denominated feeds. Available at launch: one precise feed (e.g., Pyth USD on Flow EVM); plus on-chain DEX liquidity for a correlated near-peg pair (e.g., pyUSD/USDC). The DEX quote is *not* in the numeraire — it tracks a near-peg asset and absorbs an unknown peg drift — so it is not a proper price source under I1, but it is sufficient to *sanity-gate* the precise feed.
+
+### Design: precise-source serve, approximate-source gate
+
+| Source | Role | Unit of Account |
+| :--- | :--- | :--- |
+| **A** — precise | Sole value-bearing source; served verbatim | Numeraire |
+| **B** — approximate-correlated | Sanity check only; value never served | May differ from numeraire (correlated near-peg asset) |
+
+Per query, `price(ofToken)` returns `PriceReading(value: A.value, publishTime: A.publishTime)` iff:
+
+1. `A.price(...)` and `B.price(...)` both return non-nil — else N2.
+2. Each reading is within the staleness bound against its own `publishTime` (per-source check; vMillions uses a single shared `stalenessBound`) — else N3.
+3. `|A.value − B.value| ≤ spreadThreshold` — else N5.
+
+Else `nil`.
+
+### Architecture
+
+```
+GapCircuitBreakerOracle  ← asymmetric serve + gap check (N5)
+  ├── Source A — precise, numeraire-denominated, value-bearing
+  └── Source B — approximate-correlated, sanity-only
+```
+
+Conforms to the `PriceOracle` interface; consumers see no difference from any other oracle.
+
+### Calibration: `spreadThreshold` in the gap-breaker context
+
+Differs from the multi-source aggregator's use:
+
+- **Aggregator (mature):** all sources report in the numeraire (e.g., Pyth USD + BandOracle USD), so legitimate dispersion is just per-source quote noise (two healthy USD feeds won't print to the last digit even at the same instant) plus market drift over the publish-time gap between any two contributing sources (bounded by `Δ_max`). Crucially, all source values are in the same currency, so there is no systematic offset between them (unlike the gap-breaker case below).
+- **Gap breaker (launch):** bounded below by the systematic **peg gap** between A's numeraire and B's correlated asset (e.g., USD vs pyUSD), plus DEX execution noise, plus market drift over the publish-time gap `|A.publishTime − B.publishTime|` (bounded by each source's staleness window).
+
+`spreadThreshold ≥ max plausible |peg_A − peg_B| + noise margin + market drift over the A↔B publish-time gap`. Too tight → false nils during legitimate off-peg episodes. Too loose → manipulation of A goes unflagged. Calibration is dominated by historical peg-drift statistics, not order-book noise.
+
+
+### Invariants (specialization for the gap layer)
+
+- **(I) Constancy** — `unitOfAccount := A.unitOfAccount`, declared `let`. B's UoA is checked once at construction against the configured correlated-asset type, not against `unitOfAccount`.
+- **(IV) No silent substitution** — when any of N2 / N3 / N5 fires, return `nil`. Never fall back to A alone (ignoring the gap check); never serve B; never extrapolate.
+- **(V) Publish-time** — every served `publishTime` equals `A.publishTime`. B contributes only to the go/no-go decision, not to the timestamp.
+
+### Composability
+
+`GapCircuitBreakerOracle` is a `PriceOracle`. The Volatility Circuit Breaker can wrap it identically to the way it wraps the aggregator (the breaker cares only about an upstream stream of `PriceReading`s). Not required for vMillions.
+
 ## Extension: Multi-Source Aggregator
 
-Required by the mature protocol. The aggregator is the **per-token price producer**: it pulls current observations from N independent sources, applies safety checks, returns an aggregate. The instantaneous aggregated price is derived from the *latest* source prices that are still within the staleness interval, pass optional outlier checks (for later versions), and are not `nil`.
+The **proper mature shape**, contrasting with the launch [Gap Circuit Breaker](#extension-gap-circuit-breaker): aggregates over N independent sources of **comparable reliability, each denominated in the numeraire**, rather than relying on a single precise feed sanity-gated by an approximate one. The aggregator is the per-token price producer: pull current observations from N sources, apply safety checks, return an aggregate. The instantaneous aggregated price is derived from the *latest* source prices that are still within the staleness interval, pass outlier checks (for later versions), and are not `nil`.
 
 ### Design: stateless, live-query
 
@@ -288,7 +339,7 @@ access(all) struct AggregatorOracle: PriceOracle {
 
 The choice of aggregation function is an open question (see [Open Questions](#open-questions)). Candidates considered:
 
-- **Arithmetic mean + N5 spread check** — the MVP choice. At N=2 (Pyth + BandOracle, the two signed off-chain feeds adopted at launch), median collapses into mean anyway. Mean is outlier-sensitive on its own, so the N5 spread check is the **sole outlier defense** — there is no robust-averaging fallback for N=2 that can produce a non-nil value in presence of a price source fault. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N); appropriate for launch given our source count.
+- **Arithmetic mean + N5 spread check** — the natural N=2 specialization when both sources are equally reliable (e.g., Pyth + BandOracle, two signed off-chain feeds). Median collapses into mean at N=2 anyway. Mean is outlier-sensitive on its own, so the N5 spread check is the **sole outlier defense** — no robust-averaging fallback at N=2 can produce a non-nil value in the presence of a source fault. Not the choice of any mature safety-oriented on-chain oracle (they all use median with larger N); a viable interim shape once we onboard a second equally-reliable numeraire-denominated feed, but the proper mature target is median at N≥3.
 - **Median** — Byzantine-robust to `(N−1)/2` compromised feeds; meaningful only at N≥3. Used by MakerDAO Medianizer, Chainlink OCR (Data Feeds), and Band Protocol. Caution: expensive to compute on-chain. A robust default once we can onboard additional independent sources (DEX-derived, additional bridges) — research item for mature launch.
 - **Weighted median** — per-source weights, typically inverse of stated confidence. Used by Pyth Network across its publishers. Not viable at FCM launch because only Pyth publishes confidence on Flow; BandOracle and DEX sources don't. Possible later if we standardize confidence across adopted sources. Research item for mature launch.
 - The **Geometric Mean** would be a viable candidate to consider here, because the geometric mean dampens extreme outliers compared to the arithmetic mean. (For this reason Uniswap V3 uses the geometric mean too, but in a different context).
@@ -296,7 +347,7 @@ The choice of aggregation function is an open question (see [Open Questions](#op
 
 ## Extension: Volatility Circuit Breaker
 
-The volatility circuit breaker (optional in the initial deployment, mature MUST) is a *temporal* safety layer that wraps the aggregator. Complementary to the *spatial* source-spread check (N5): N5 catches **single-source manipulation** (one source disagreeing with the others — caught per-tick by spread); the breaker catches **correlated fast movement of the aggregate itself** (median shifting too quickly, e.g., all sources reflecting a flash-crash or a coordinated manipulation across venues) — which N5 cannot see because every source agrees.
+Required for the mature protocol; not deployed at vMillions (the [Gap Circuit Breaker](#extension-gap-circuit-breaker) carries the launch safety load — temporal-vs-spatial decomposition becomes meaningful only once the [Multi-Source Aggregator](#extension-multi-source-aggregator) lands). The volatility circuit breaker is a *temporal* safety layer that wraps the aggregator. Complementary to the *spatial* source-spread check (N5): N5 catches **single-source manipulation** (one source disagreeing with the others — caught per-tick by spread); the breaker catches **correlated fast movement of the aggregate itself** (median shifting too quickly, e.g., all sources reflecting a flash-crash or a coordinated manipulation across venues) — which N5 cannot see because every source agrees.
 
 ### Scope — what the breaker is measuring
 
@@ -495,7 +546,7 @@ The recommended default metric (see Metric shape, below) is valid under this bou
 ### Invariants and timing bounds
 
 - **B.I Fail-closed on trip.** When a deviation check rejects an observation, breaker state is unchanged. Consumers continue to see the previously-accepted value until it ages past the staleness bound (N3). Trip signalling to off-chain monitoring is covered by I3.
-- **B.II Publish-time discipline.** Specialization of Invariant V. The breaker does not synthesize a `publishTime`: every observation it records and serves carries the upstream's `PriceReading.publishTime` propagated unchanged. In the documented architecture (breaker wraps aggregator), that resolves to `min(publishTime)` over the aggregator's contributing source readings at that tick (Aggregator sketch step 5). Never relabeled with the tick's execution time, `block.timestamp`, or any timestamp computed at acceptance.
+- **B.II Publish-time discipline.** Specialization of Invariant V. The breaker does not synthesize a `publishTime`: every observation it records and serves carries the upstream's `PriceReading.publishTime` propagated unchanged. In the documented architecture (breaker wraps aggregator), that resolves to `min(publishTime)` over the aggregator's contributing source readings at that tick (Aggregator sketch step 5). 
 - **B.III Query idempotence.** Specialization of Invariant II / I5: consumer reads cannot mutate breaker state; state mutation is restricted to the scheduled-tick context. Same-transaction reads return the same value; same-block reads across different transactions return the same value unless a scheduled `executeTransaction` interleaves.
 - **B.IV Atomic per-tick update.** Each scheduled tick either commits its state transition — new observation, any pruning — in full, or commits nothing. No partial states.
 - **B.V History monotonic and window-bounded.** The internal observation log is strictly increasing in `publishTime`; retained entries lie within a configured window ending at the most recent observation.
@@ -521,8 +572,8 @@ Components: the breaker's staleness gate, the aggregator's staleness gate, the w
 
 This spec describes the mature protocol. The initial deployment may diverge as temporary shortcuts — each is well-encapsulated so mature-protocol progression is an implementation change, not a spec change.
 
-- **Single-source oracle (possibly).** If approved under the beta constraints (invite-only, FYV-only, <$1M exposure), the initial deployment may ship with one source. Mature MUST NOT.
-- **No volatility circuit breaker.** Optional initially; mature MUST. Progression: wrap the aggregator with `CircuitBreakerOracle`; no interface change.
+- **Gap Circuit Breaker, not Multi-Source Aggregator.** vMillions ships the [Gap Circuit Breaker](#extension-gap-circuit-breaker): one precise numeraire-denominated source, sanity-gated by a correlated DEX-derived approximate source. Approved under beta risk constraints (invite-only, FYV-only, <$1M exposure). Mature replaces this with the [Multi-Source Aggregator](#extension-multi-source-aggregator) over N≥2 equally-reliable numeraire-denominated sources; no `PriceOracle` interface change.
+- **No volatility circuit breaker at launch.** [Volatility Circuit Breaker](#extension-volatility-circuit-breaker) is a mature MUST; at launch the gap breaker carries the safety load. Progression: wrap the aggregator with `CircuitBreakerOracle`; no interface change.
 
 ## Open Questions
 
@@ -533,7 +584,7 @@ This spec describes the mature protocol. The initial deployment may diverge as t
 - **Breaker EWMA parameters** `τ_half` (half-life) and `k` (z-score trip threshold). Empirical per token. Alternative metric choice remains open if calibration proves unworkable.
 - **Source-time spread bound** `Δ_max`. Tight enough to keep aggregate-blend bias small relative to `τ_half`; loose enough not to starve the aggregator under realistic cross-source cadence (Pyth sub-second vs. BandOracle minutes).
 - **Exact mathematical formulas** for the breaker metric and aggregator remain open. The recommended defaults in this spec are a starting point; specific functional forms are subject to change during empirical calibration.
-- **Single-source failure policy.** At launch (N=2) the aggregator nils on any source failure — filtering to N=1 is indefensible. At mature (N≥3+ with median) we should shift to filter-and-quorum; MakerDAO Medianizer's `bar` parameter is the clearest precedent (minimum number of valid signed feeds required for a non-nil aggregate). Plan: bake in a minimum-quorum parameter now, set to `N` at launch, relax once we have enough sources for filtering to preserve Byzantine tolerance. Breaker does NOT trip on source failures — staleness pathway handles fail-closed.
+- **Filter-and-quorum threshold for the mature aggregator** (N≥3). Once a third independent equally-reliable source is onboarded, the aggregator should shift from "any source nil → aggregate nil" to filter-and-quorum (MakerDAO Medianizer's `bar` parameter is the clearest precedent — minimum number of valid signed feeds required for a non-nil aggregate). Plan: bake in a minimum-quorum parameter, set to `N` initially, relax as Byzantine tolerance permits. Out of scope for vMillions — the gap breaker is asymmetric (A nil → aggregate nil; B nil → aggregate nil), no quorum question arises. The volatility breaker does NOT trip on source failures — the staleness pathway handles fail-closed.
 
 ## Non-Goals
 
