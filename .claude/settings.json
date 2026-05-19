@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flow cadence lint:*)",
+      "Bash(make lint)",
+      "Bash(flow test:*)"
+    ]
+  }
+}
