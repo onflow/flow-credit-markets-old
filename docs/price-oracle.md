@@ -11,7 +11,7 @@
 
 ### Problem
 
-FCM must protect collateral, maintain solvency despite large asset shifts, and execute liquidations. Every decision towards those goals depends on a price for each supported token, denominated in the Numeraire. At the time of writing, we use USD as numeraire (see [Numeraire spec](./Numeraire.md)). Relying on a single source for an asset price is generally unsafe — a source can be stale, manipulated, frozen, or compromised, and operating on a bad price produces incorrect valuations, missed liquidations, or wrongful seizures. The protocol therefore needs a *price-of-truth* abstraction that (a) is robust to single-source failure and (b) may return an "I can't answer reliably right now" or otherwise a trustworthy price signal.
+FCM must protect collateral, maintain solvency despite large asset shifts, and execute liquidations. Every decision towards those goals depends on a price for each supported token, denominated in the Numeraire. At the time of writing, we use USD as numeraire (see [Numeraire spec](./Numeraire.md)). Relying on a single source for an asset price is generally unsafe, because real-world price sources can be stale, manipulated, frozen, or compromised. Operating on a bad price may produce incorrect valuations, missed liquidations, or wrongful seizures. The protocol therefore needs a *price-of-truth* abstraction that (a) is robust to single-source failure and (b) may return an "I can't answer reliably right now" or otherwise a trustworthy price signal.
 
 ### Goal
 
@@ -26,29 +26,40 @@ A minimal `PriceOracle` interface that:
 
 The interface and the requirements on consumers (Caller Contract) are intended to survive unchanged to the mature protocol. Implementation choices (number of sources, staleness bound, presence of a circuit-breaker wrapper, exact aggregation function) will evolve.
 
-## Assumptions
 
-The spec makes the following axiomatic assumptions. If any is violated, the conclusions below do not hold.
 
-- **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources — uncorrelated in their failure modes and vulnerability to manipulation. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
-- **Sources attest `publishTime` truthfully.** A source MUST report the actual moment its value was observed — not the query time, not the chain's current `block.timestamp`. If a source misreports `publishTime`, staleness checks (N3) are defeated. Staleness is anchored on source-attested `publishTime`, never `block.timestamp`; substituting the latter would launder pull-style stale data (e.g., a Pyth contract sitting unrefreshed) past the staleness check. Real-world clock drift between source-attested time and chain time is absorbed into staleness-bound calibration; suspiciously future-dated readings (buggy or adversarial source) are caught and surfaced as nil via N4.
-- **Majority-honest sources (Byzantine bound).** Across N≥3 sources (where N is the number of independent price sources configured for the token), strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 this collapses to "no compromised source" and median collapses to mean — spread check N5 carries the load.)
+## Nomenclature and Central Concept
 
-**Temporary Simplification:** For the product milestone "Rebuild V0.2", we will not satisfy these axioms fully. Specifically, we will only have one true price source denominated in the numeraire. A DEX is used as a secondary price source. However, a DEX will typically not report the prices in the numeraire so prices have to be approximately converted, for which reason the DEX should not be considered a proper price source. We will use the DEX as an input to the Circuit Breaker (discussed below), but not incorporate its potentially imprecise output signal on the happy path in the "price-of-truth".
+*Concepts* (stable across versions):
 
-## Nomenclature
-
-| Term | Definition |
+| Concept | Definition |
 | :--- | :--- |
 | **Numeraire** | The protocol-wide unit of account in which FCM denominates all values. By convention the numeraire for FCM is currently the **USD Numeraire** (a `FungibleToken` type representing USD for which no vault ever exists on-chain); this choice is a protocol-level convention and may change. Tokens like pyUSD, USDC, FUSD are *denominated in* the current numeraire. |
 | **Unit of Account** (UoA) | The `FungibleToken` type in which prices returned by the oracle are denominated. A Cadence `Type`, not a string. For FCM, always the Numeraire (tentatively USD) by convention. |
 | **Price Source** (or *source*) | A producer of pricing data — e.g., on-chain DEX pool, or a signed off-chain feed bridged onto Flow (Pyth, BandOracle). Caution: a `Price Source` might use units of account other than the numeraire for their returned prices. The trust model for price sources is: mostly reliable but not fully trusted. |
-| **Independent sources** | Sources whose failure or manipulation modes are uncorrelated. Two DEX pools fed by the same arbitrageur flow are NOT independent; a DEX and a signed off-chain feed ARE. |
+| **Independent sources** | Price sources that are uncorrelated in their failure modes and vulnerability to manipulation. Two DEX pools fed by the same arbitrageur flow are NOT independent; a DEX and a signed off-chain feed ARE. |
+
+*Parameters* (deployment-tunable):
+
+| Protocol Paramter  | Definition |
+| :--- | :--- |
 | **Staleness bound** | Maximum age of the newest datum a returned price depends on. Measured against source publish time (I7). |
-| **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Must satisfy T.I (`δ_cadence < stalenessBound`) and T.II (`historyWindow ≥ K · δ_cadence`). |
-| **Δ_max** | Max source-time spread per tick: aggregator MUST reject readings with intra-tick spread `maxᵢ tᵢ − minᵢ tᵢ > Δ_max` (see Source-time spread). |
+| **δ_cadence** | Breaker-specific: the interval between scheduled `executeTransaction` invocations. Bounded above by the staleness bound (T.I) and below by the breaker's history-window length (T.II). |
+| **Δ_max** | Maximum allowed source-time spread within a single aggregator tick: if the newest and oldest contributing source observation times differ by more than `Δ_max`, the aggregator MUST reject the tick and return `nil`. Formal definition: see [Source-time spread](#source-time-spread). |
 | **σ_scheduler** | Scheduler-slack bound: worst-case excess of actual inter-tick delay over `δ_cadence` (composite-bound term; environmental, not tuned). |
 | **ε_skew** | Bound on skew between source-attested `publishTime` and on-chain block time (composite-bound term; see Assumptions). |
+
+## Assumptions
+
+The spec makes the following axiomatic assumptions. If any is violated, the conclusions below do not hold.
+
+- **Independent sources exist.** For each supported token in the mature protocol, there exist ≥ 2 independent price sources. Without this, multi-source aggregation buys no safety over a single feed, and the N5 / spread-check layer degenerates.
+- **Sources attest `publishTime` truthfully.** A source MUST report the actual moment its value was observed — not the query time, not the chain's current `block.timestamp`. If a source misreports `publishTime`, staleness checks (N3) are defeated. Staleness is anchored on source-attested `publishTime`, never `block.timestamp`; substituting the latter would launder pull-style stale data (e.g., a Pyth contract sitting unrefreshed) past the staleness check. Real-world clock drift between source-attested time and chain time is absorbed into staleness-bound calibration; suspiciously future-dated readings (buggy or adversarial source) are caught and surfaced as nil via N4.
+- **Majority-honest sources (Byzantine bound).** Across N≥3 sources (where N is the number of independent price sources configured for the token), strictly fewer than half are simultaneously compromised or stale; required for median aggregation to be robust. (At N=2 the bound permits zero compromised sources; aggregation provides no Byzantine tolerance.) As a last line of defense, the N5 spread check (below) detects source disagreement and returns `nil` — see [Appendix: Safety over liveness during oracle anomalies](#appendix-safety-over-liveness-during-oracle-anomalies).
+
+
+**Temporary Simplification:** For the product milestone "Rebuild V0.2", we will not satisfy these axioms fully. Specifically, we will only have one true price source denominated in the numeraire. A DEX is used as a secondary price source. However, a DEX will typically not report the prices in the numeraire so prices have to be approximately converted, for which reason the DEX should not be considered a proper price source. We will use the DEX as an input to the Circuit Breaker (discussed below), but not incorporate its potentially imprecise output signal on the happy path in the "price-of-truth".
+
 
 ## Interface
 
@@ -66,10 +77,13 @@ access(all) struct interface PriceOracle {
 
 The interface is part of this spec; implementations MUST NOT add methods returning a price without the full safety contract.
 
-- `unitOfAccount` — immutable `let` field, set once at `init`. Type-enforced constancy across the struct's lifetime (invariant I). Single source of truth for the oracle's unit of account; used for the registration handshake (C3).
-- `price(ofToken)` — returns non-nil only if every Nil Contract condition holds. Panic behavior is implementation-dependent: read-through implementations (single-source, aggregator) can propagate upstream panics — irreducible at the platform level; breaker-wrapped implementations serve from local state and are structurally panic-free (see I6, C6). Not `view`: implementations may on demand refresh a cache, pull from a price source, or transact cross into Flow EVM (e.g., to call a Pyth update). Side effects MUST NOT alter future observations (invariant II). Querying an unsupported token is a normal `nil` (see N1 below).
+- `unitOfAccount` — set at `init`. Single source of truth for the oracle's unit of account; used for the registration handshake (C3). Immutable (`let` field) throughout the struct's lifetime (invariant I). 
+- `price(ofToken)` — the oracle's read method. Properties:
+  - **Return contract.** Returns non-nil only if every condition in the [Nil Contract](#nil-contract) holds. An unsupported `ofToken` returns `nil` as per (N1).
+  - **Panic behavior is implementation-dependent.** *Read-through* implementations (single-source, aggregator) can propagate upstream panics; this is irreducible at the platform level (see I6). *Breaker-wrapped* implementations serve from local state and are structurally panic-free. Caller responsibilities: see C6.
+  - **Side effects allowed (not `view`).** Implementations may refresh a cache on demand, pull from a price source, or transact cross into Flow EVM (e.g., to trigger a Pyth update). Side effects MUST NOT alter future observations — see invariant II.
 
-**`PriceReading` is the only way to observe a price.** `value` and `publishTime` are bundled in one atomic return so callers cannot observe one without the other. The interface MUST NOT offer a separate `publishTimeOf(token: Type)` getter — a two-call pattern reintroduces a race between the reads and defeats I7.
+**`PriceReading` is the only way to observe a price.** `value` and `publishTime` are bundled in one atomic return so callers cannot observe one without the other. The interface MUST NOT offer a separate `publishTimeOf(token: Type)` getter — a two-call pattern reintroduces a race between the reads and defeats (I7).
 
 - `value` — price denominated in `unitOfAccount` per one token, at `publishTime`.
 - `publishTime` — source-attested observation time (I7). For aggregators, the oldest contributing source's publishTime (min-semantics); for breakers, the publishTime of the last accepted observation, unchanged.
@@ -515,4 +529,22 @@ Deliberate acknowledgments where the spec's safety model has honest gaps.
 
 - **Capability-swap with matching UoA.** A consumer's stored capability can be re-bound to a different oracle after the C3 registration-time check; a swap to an oracle with the same UoA (e.g., WETH/USD → WBTC/USD) goes undetected. The `let unitOfAccount` field rules out a single oracle changing its own UoA — not capability-level swaps. Future mitigation: pin source identity at registration and re-verify per use.
 
+## Appendix: Prioritizing Safety over liveness during oracle anomalies
+
+FCM prioritizes safety over liveness during oracle anomalies, a design choice supported by the following empirical and theoretical evidence. During the Terra-LUNA collapse, lending protocols that continued operating with divergent price feeds, including Blizz Finance and Scream, suffered terminal liquidity drainage [[BlizzVenus2](https://therecord.media/collapse-of-luna-cryptocurrency-leads-to-11-million-exploit-on-venus-protocol), [AvNo2022](https://www.theblock.co/post/147046/defi-lender-left-with-35-million-bad-debt-after-quoting-depegged-stablecoins-at-1)]. In contrast, platforms that implemented timely pauses, such as Aave and Venus, contained bad debt and avoided insolvency [[AaveUST2022](https://governance.aave.com/t/canceling-aip-74-freezing-ust-and-updating-steth-parameters/8154), [MessariAave22](https://messari.io/report/the-state-of-aave-q2-2022), [BlizzVenus](https://rekt.news/venus-blizz-rekt)]. Furthermore, formal analyses indicate that imposing ad-hoc delays or temporal smoothing of price feeds can exacerbate protocol risk [[Deng 2024](https://doi.org/10.48550/arXiv.2401.06044), [Mackinga 2022](https://doi.org/10.1109/ICBC54727.2022.9805499)]. We therefore treat oracle faults as Byzantine inputs that justify a temporary pause in operation to protect FCM and user assets.
+
+Recent research suggests that protocol pauses should remain last-resort containment mechanisms rather than default responses to oracle anomalies [[Qu2025](https://doi.org/10.48550/arXiv.2506.00505), [You2026](https://doi.org/10.48550/arXiv.2601.12434)]. Adaptive approaches are promising as graduated risk containment strategies. Cross-chain analysis shows that oracle deviations can widen under certain configurations and market stress [[Gansauer2025](https://doi.org/10.1007/978-3-032-00492-5_3)]. FCM can detect such deviations and automatically tighten asset-specific limits, for example by reducing effective collateral factors, restricting borrowing or modulating liquidation intensity as oracle uncertainty rises. Research is ongoing to formalize and tune these throttling mechanisms within FCM.
+
+### References
+
+- [AaveUST2022] P.J. Lei (Gauntlet). *Canceling AIP-74, Freezing UST, and Updating stETH Parameters* (Aave governance proposal), 2022. <https://governance.aave.com/t/canceling-aip-74-freezing-ust-and-updating-steth-parameters/8154>
+- [AvNo2022] O. Avan-Nomayo. *DeFi lender left with $35 million bad debt after quoting depegged stablecoins at $1* (crypto news), The Block, 2022. <https://www.theblock.co/post/147046/defi-lender-left-with-35-million-bad-debt-after-quoting-depegged-stablecoins-at-1>
+- [BlizzVenus] *Blizz Finance, Venus Protocol* (technical blog), Rekt, 2022. <https://rekt.news/venus-blizz-rekt>
+- [BlizzVenus2] J. Greig. *Collapse of Luna cryptocurrency leads to $11 million exploit on Venus Protocol* (crypto news), The Record, 2022. <https://therecord.media/collapse-of-luna-cryptocurrency-leads-to-11-million-exploit-on-venus-protocol>
+- [Deng 2024] X. Deng, S.M. Beillahi, C. Minwalla, H. Du, A. Veneris, F. Long. *Safeguarding DeFi Smart Contracts against Oracle Deviations*, in IEEE ICSE proceedings, 2024. <https://doi.org/10.48550/arXiv.2401.06044>
+- [Gansauer2025] R. Gansäuer, H.B. Aoun, J. Droll, H. Hartenstein. *Price Oracle Accuracy Across Blockchains: A Measurement and Analysis*, in FC'25 proceedings, 2025. <https://doi.org/10.1007/978-3-032-00492-5_3>
+- [Mackinga 2022] T. Mackinga, T. Nadahalli, R. Wattenhofer. *TWAP Oracle Attacks: Easier Done than Said*, in IEEE ICBC proceedings, 2022. <https://doi.org/10.1109/ICBC54727.2022.9805499>
+- [MessariAave22] D. Teander. *State of Aave Q2 2022*, Messari, 2022. <https://messari.io/report/the-state-of-aave-q2-2022>
+- [Qu2025] H. Qu, K. Gogol, F. Groetschla, C. Tessone. *From Rules to Rewards: Reinforcement Learning for Interest Rate Adjustment in DeFi Lending* (paper preprint), 2025. <https://doi.org/10.48550/arXiv.2506.00505>
+- [You2026] S. You, A. Joshi, A. Kuehlkamp, J. Nabrzyski. *ASAS-BridgeAMM: Trust-Minimized Cross-Chain Bridge AMM with Failure Containment* (paper preprint), 2026. <https://doi.org/10.48550/arXiv.2601.12434>
 
