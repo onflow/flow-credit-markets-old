@@ -10,17 +10,12 @@ import "helpers/actions_helpers.cdc"
 
 access(all) var signer = Test.createAccount()
 
-access(all) var snapShot: UInt64 = 0
-
-access(all) fun beforeEach() {
-    if snapShot != getCurrentBlockHeight() {
-        Test.reset(to: snapShot)
-    }
-}
+access(all) var snapshot: UInt64 = 0
+access(all) fun beforeEach() { Test.reset(to: snapshot) }
 
 access(all) fun setup() {
     deployAllContracts()
-    snapShot = getCurrentBlockHeight()
+    snapshot = getCurrentBlockHeight()
 }
 
 access(all) fun test_script() {
